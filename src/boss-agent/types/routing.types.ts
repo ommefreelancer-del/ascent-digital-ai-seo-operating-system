@@ -13,7 +13,7 @@ export interface RoutingCandidate {
   readonly matchedTerms: readonly string[];
 }
 
-export type RoutingStatus = "assigned" | "escalated" | "rejected";
+type RoutingStatus = "assigned" | "escalated" | "rejected";
 
 /**
  * The result of routing a single task. Exactly one of `assigned` /

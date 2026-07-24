@@ -4,10 +4,16 @@
 // prints the routing decision for every task and exits. This matches the
 // chosen "CLI script, one objective per run" invocation model — there is no
 // long-running server in this build.
+//
+// Lifecycle is managed through BossOrchestrator (start -> run -> stop)
+// rather than calling BossAgent directly, so that a run interrupted while
+// blocked on a human approval prompt (SIGINT/SIGTERM) still records a
+// matching "orchestrator_stopped" audit event instead of just vanishing.
 
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
-import { BossAgent, type RunSummary } from "./boss-agent/boss-agent.js";
+import { BossOrchestrator } from "./boss-agent/boss-orchestrator.js";
+import type { RunSummary } from "./boss-agent/boss-agent.js";
 import { loadBossAgentConfig } from "./boss-agent/config/boss-agent.config.js";
 import type { TaskInput } from "./boss-agent/types/task.types.js";
 
@@ -43,9 +49,45 @@ async function main(): Promise<void> {
     priority: "normal",
   }));
 
-  const bossAgent = await BossAgent.create(config);
-  const summary = await bossAgent.run(tasks);
-  printSummary(summary);
+  const orchestrator = await BossOrchestrator.create(config);
+  registerShutdownHandlers(orchestrator);
+
+  await orchestrator.start();
+  try {
+    const summary = await orchestrator.run(tasks);
+    printSummary(summary);
+  } finally {
+    await orchestrator.stop();
+  }
+}
+
+/**
+ * Ensures Ctrl-C / a termination signal during a run (most likely while
+ * blocked on a human approval prompt) still calls stop() -- so the audit
+ * trail records a clean shutdown instead of the process just disappearing.
+ * Node suppresses its default terminate-on-signal behavior once a listener
+ * is registered, so this must exit the process itself once stop() settles.
+ */
+function registerShutdownHandlers(orchestrator: BossOrchestrator): void {
+  let shuttingDown = false;
+  const shutdown = (signal: string): void => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    process.stderr.write(`\nReceived ${signal}, shutting down...\n`);
+    orchestrator
+      .stop()
+      .then(() => {
+        process.exit(0);
+      })
+      .catch((error: unknown) => {
+        process.stderr.write(`Error while shutting down: ${String(error)}\n`);
+        process.exit(1);
+      });
+  };
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 function printUsage(): void {

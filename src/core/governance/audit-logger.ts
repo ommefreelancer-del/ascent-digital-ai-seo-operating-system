@@ -4,14 +4,15 @@
 // so the run can be reconstructed and reviewed after the fact.
 
 import { randomUUID } from "node:crypto";
-import { JsonlAppender } from "../persistence/jsonl-appender.js";
+import { JsonlAppender, type JsonlAppenderOptions } from "../persistence/jsonl-appender.js";
 import type { AuditEvent, AuditEventInput } from "../types/audit-event.types.js";
 
 export class AuditLogger {
   private readonly appender: JsonlAppender;
 
-  constructor(filePath: string) {
-    this.appender = new JsonlAppender(filePath);
+  /** `options` (log rotation size/backup count) is optional -- every existing call site is unaffected. */
+  constructor(filePath: string, options?: JsonlAppenderOptions) {
+    this.appender = new JsonlAppender(filePath, options);
   }
 
   async logEvent(input: AuditEventInput): Promise<AuditEvent> {

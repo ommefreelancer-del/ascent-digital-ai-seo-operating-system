@@ -9,7 +9,11 @@
 export type EscalationReason =
   | "no_matching_candidate"
   | "ambiguous_match"
-  | "low_confidence_match";
+  | "low_confidence_match"
+  | "policy_risk"
+  | "destructive_action"
+  | "pricing_agreement"
+  | "prompt_injection";
 
 /** One option the human reviewer can choose between. */
 export interface ApprovalCandidate {

@@ -5,7 +5,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export interface RawAgentSpecFile {
+interface RawAgentSpecFile {
   readonly sourcePath: string;
   readonly content: string;
 }

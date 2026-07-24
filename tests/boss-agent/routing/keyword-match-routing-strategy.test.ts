@@ -76,4 +76,35 @@ describe("KeywordMatchRoutingStrategy", () => {
     expect(result.agentId).toBe("x");
     expect(result.agentTitle).toBe("X Agent");
   });
+
+  it("produces the same real score for the same real candidate object across repeated calls (memoized term set)", () => {
+    const candidate = makeAgentSpec();
+
+    const first = strategy.score(makeTask("Perform keyword research"), candidate);
+    const second = strategy.score(makeTask("Perform keyword research"), candidate);
+
+    expect(second).toEqual(first);
+  });
+
+  it("scores independently for two different task descriptions against the same cached candidate", () => {
+    const candidate = makeAgentSpec();
+
+    const broadMatch = strategy.score(makeTask("Perform keyword research"), candidate);
+    const noMatch = strategy.score(makeTask("Negotiate publisher backlink pricing"), candidate);
+
+    expect(broadMatch.score).toBe(1);
+    expect(noMatch.score).toBe(0);
+  });
+
+  it("keeps two distinct AgentSpec objects with identical content scored independently (cache keyed by identity, not content)", () => {
+    const specA = makeAgentSpec({ id: "a", title: "A" });
+    const specB = makeAgentSpec({ id: "b", title: "B" });
+
+    const resultA = strategy.score(makeTask("Perform keyword research"), specA);
+    const resultB = strategy.score(makeTask("Perform keyword research"), specB);
+
+    expect(resultA.agentId).toBe("a");
+    expect(resultB.agentId).toBe("b");
+    expect(resultA.matchedTerms).toEqual(resultB.matchedTerms);
+  });
 });

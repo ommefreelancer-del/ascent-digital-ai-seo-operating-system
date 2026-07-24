@@ -49,14 +49,15 @@ function toTermSet(texts: readonly string[]): Set<string> {
 export class KeywordMatchRoutingStrategy implements RoutingStrategy {
   readonly name = "keyword-match";
 
+  // AgentSpec objects are loaded once by AgentRegistry and reused for the
+  // lifetime of the process, so their term sets never change -- caching by
+  // object identity avoids re-tokenizing the same mission/responsibilities/
+  // inputs/outputs on every single routed task.
+  private readonly agentTermsCache = new WeakMap<AgentSpec, Set<string>>();
+
   score(task: TaskInput, candidate: AgentSpec): RoutingCandidate {
     const taskTerms = toTermSet([task.description]);
-    const agentTerms = toTermSet([
-      candidate.mission,
-      ...candidate.responsibilities,
-      ...candidate.inputs,
-      ...candidate.outputs,
-    ]);
+    const agentTerms = this.getAgentTerms(candidate);
 
     if (taskTerms.size === 0) {
       return {
@@ -77,5 +78,20 @@ export class KeywordMatchRoutingStrategy implements RoutingStrategy {
       score: matchedTerms.length / taskTerms.size,
       matchedTerms,
     };
+  }
+
+  private getAgentTerms(candidate: AgentSpec): Set<string> {
+    const cached = this.agentTermsCache.get(candidate);
+    if (cached) {
+      return cached;
+    }
+    const computed = toTermSet([
+      candidate.mission,
+      ...candidate.responsibilities,
+      ...candidate.inputs,
+      ...candidate.outputs,
+    ]);
+    this.agentTermsCache.set(candidate, computed);
+    return computed;
   }
 }

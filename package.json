@@ -1,15 +1,15 @@
 {
   "name": "adasos-boss-agent",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "Boss Agent orchestration and routing framework for the Ascent Digital AI SEO Operating System (ADASOS).",
+  "description": "Production implementation of the Ascent Digital AI SEO Operating System (ADASOS): a Boss Agent orchestration and routing framework coordinating 27 specialist agents (SEO strategy, content, technical/on-page/off-page SEO, outreach, guest posting, CRM, business development, reporting, and administration), alongside a Conversation & Language Manager and Voice Interface.",
   "type": "module",
   "engines": {
     "node": ">=18.18.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/cli.js",
+    "start": "node dist/src/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"

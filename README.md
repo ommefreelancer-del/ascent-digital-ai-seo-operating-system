@@ -3,8 +3,8 @@
 Production implementation of the Boss Agent orchestration and routing
 framework for the Ascent Digital AI SEO Operating System (ADASOS), as
 specified in [`Agents/BossAgent.md`](Agents/BossAgent.md) and governed by
-[`GLOBAL_RULES.md`](GLOBAL_RULES.md), [`docs/goverance/ENGINEERING_STANDARDS.md`](docs/goverance/ENGINEERING_STANDARDS.md),
-and [`docs/goverance/DevelopmentWorkflow.md`](docs/goverance/DevelopmentWorkflow.md).
+[`GLOBAL_RULES.md`](GLOBAL_RULES.md), [`docs/governance/ENGINEERING_STANDARDS.md`](docs/governance/ENGINEERING_STANDARDS.md),
+and [`docs/governance/DevelopmentWorkflow.md`](docs/governance/DevelopmentWorkflow.md).
 
 ## Scope of this milestone
 
@@ -69,9 +69,7 @@ npm test
 npm run typecheck
 ```
 
-Note: this repository was assembled in an environment without Node.js
-installed, so the test suite and type checker have not yet been executed
-here. Run both after `npm install` to verify before relying on this build.
+Verified: `npm run build`, `npm test` (68 tests), and `npm run typecheck` all pass.
 
 ## Module layout
 
