@@ -54,6 +54,20 @@ function toOriginPathSearch(url: URL): string {
   return `${url.origin}${url.pathname}${url.search}`;
 }
 
+/**
+ * Normalizes a URL's origin for same-site scoping, treating "www.<host>" and
+ * "<host>" as the same site -- protocol and port still distinguish origins.
+ * Real sites commonly redirect one to the other (e.g. openai.com <->
+ * www.openai.com); without this, a sitemap discovered on the post-redirect
+ * host is silently excluded from a crawl seeded with the pre-redirect host,
+ * and vice versa, even though both are the same site.
+ */
+function canonicalOrigin(url: URL): string {
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  const port = url.port ? `:${url.port}` : "";
+  return `${url.protocol}//${host}${port}`;
+}
+
 async function discoverSitemapUrls(origin: string, robotsTxt: ParsedRobotsTxt | null, limitations: string[]): Promise<string[]> {
   const sitemapUrls: string[] = [];
   const candidates = robotsTxt?.sitemaps.length ? [...robotsTxt.sitemaps] : [new URL("/sitemap.xml", origin).toString()];
@@ -87,6 +101,12 @@ export async function crawlWebsite(startUrl: string, options: WebsiteCrawlerOpti
   const userAgent = options.userAgent ?? DEFAULT_USER_AGENT;
   const limitations: string[] = [];
   const origin = new URL(startUrl).origin;
+  // Used for same-site scoping decisions only (queue/link filtering) -- the
+  // real (non-normalized) `origin` above is still what's used to build
+  // actual fetch URLs (robots.txt, sitemap.xml fallback), so this never
+  // changes which host is actually requested, only which discovered URLs
+  // count as "this site" for crawl inclusion.
+  const siteOrigin = canonicalOrigin(new URL(startUrl));
 
   let robotsTxt: ParsedRobotsTxt | null = null;
   let robotsTxtContent: string | null = null;
@@ -103,7 +123,7 @@ export async function crawlWebsite(startUrl: string, options: WebsiteCrawlerOpti
   const queue: { url: string; discoveredFrom: string | null }[] = [{ url: startUrl, discoveredFrom: null }];
   const sameOriginSitemapUrls = sitemapUrls.filter((u) => {
     try {
-      return new URL(u).origin === origin;
+      return canonicalOrigin(new URL(u)) === siteOrigin;
     } catch {
       return false;
     }
@@ -125,7 +145,7 @@ export async function crawlWebsite(startUrl: string, options: WebsiteCrawlerOpti
     } catch {
       continue;
     }
-    if (targetUrl.origin !== origin) continue;
+    if (canonicalOrigin(targetUrl) !== siteOrigin) continue;
     if (targetUrl.protocol !== "http:" && targetUrl.protocol !== "https:") continue;
 
     const normalized = toOriginPathSearch(targetUrl);
@@ -169,7 +189,7 @@ export async function crawlWebsite(startUrl: string, options: WebsiteCrawlerOpti
         } catch {
           continue;
         }
-        if (linkUrl.origin !== origin) continue;
+        if (canonicalOrigin(linkUrl) !== siteOrigin) continue;
         if (linkUrl.protocol !== "http:" && linkUrl.protocol !== "https:") continue;
         const linkNormalized = toOriginPathSearch(linkUrl);
         // Bound the queue itself, not just visited pages, so a page with an

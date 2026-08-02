@@ -40,6 +40,84 @@ function installFetchMock() {
   );
 }
 
+// Fixture for www/non-www origin-normalization regression tests: robots.txt
+// (served on the www host, since fetch URLs are still built from the real,
+// non-normalized seed origin) points to a sitemap on the NON-www host --
+// mirroring real sites like openai.com that redirect www -> non-www and
+// publish their sitemap on the post-redirect host.
+const WWW_PAGES: Record<string, { status: number; body: string }> = {
+  "https://www.acme-test.example/robots.txt": {
+    status: 200,
+    body: "User-agent: *\nSitemap: https://acme-test.example/sitemap.xml",
+  },
+  "https://acme-test.example/sitemap.xml": {
+    status: 200,
+    body: `<urlset><url><loc>https://acme-test.example/from-sitemap/</loc></url></urlset>`,
+  },
+  "https://www.acme-test.example/": {
+    status: 200,
+    body: `<html><body>
+      <a href="https://acme-test.example/linked-page/">Linked (non-www)</a>
+      <a href="https://blog.acme-test.example/">Different subdomain</a>
+      <a href="https://evil.example/">Genuinely external</a>
+    </body></html>`,
+  },
+  "https://acme-test.example/from-sitemap/": { status: 200, body: "<html><body>From sitemap (non-www)</body></html>" },
+  "https://acme-test.example/linked-page/": { status: 200, body: "<html><body>Linked (non-www)</body></html>" },
+};
+
+function installWwwFetchMock() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string | URL) => {
+      const href = url.toString();
+      const page = WWW_PAGES[href];
+      if (!page) return new Response("not found", { status: 404 });
+      return new Response(page.body, { status: page.status });
+    }),
+  );
+}
+
+describe("crawlWebsite -- www/non-www origin normalization", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("treats www.example.com and example.com as the same site when following links", async () => {
+    installWwwFetchMock();
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    const result = await crawlWebsite("https://www.acme-test.example/");
+
+    const urls = result.pages.map((p) => p.url);
+    expect(urls).toContain("https://www.acme-test.example/");
+    expect(urls).toContain("https://acme-test.example/linked-page/");
+  });
+
+  it("does not discard sitemap URLs because of a www/non-www difference from the seed URL", async () => {
+    installWwwFetchMock();
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    const result = await crawlWebsite("https://www.acme-test.example/");
+
+    // The sitemap itself was discovered and parsed...
+    expect(result.sitemapUrls).toContain("https://acme-test.example/from-sitemap/");
+    // ...and, critically, its non-www URL was actually queued and crawled,
+    // not silently dropped by the same-origin filter.
+    const urls = result.pages.map((p) => p.url);
+    expect(urls).toContain("https://acme-test.example/from-sitemap/");
+  });
+
+  it("still excludes genuinely different hosts, including other subdomains -- only a literal www. prefix is normalized", async () => {
+    installWwwFetchMock();
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    const result = await crawlWebsite("https://www.acme-test.example/");
+
+    const urls = result.pages.map((p) => p.url);
+    expect(urls.some((u) => u.includes("evil.example"))).toBe(false);
+    expect(urls.some((u) => u.includes("blog.acme-test.example"))).toBe(false);
+  });
+});
+
 describe("crawlWebsite", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
