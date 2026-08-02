@@ -104,4 +104,97 @@ describe("extractHtmlFacts", () => {
     const html = '<link href="https://example.com/reversed" rel="canonical">';
     expect(extractHtmlFacts(html).canonicalHref).toBe("https://example.com/reversed");
   });
+
+  it("recovers gracefully from malformed/unclosed tags rather than throwing", () => {
+    // <title> is RCDATA: without a literal </title>, a real parser (and a
+    // real browser) treats everything after it as title text -- this is
+    // correct recovery behavior, not a bug, and is exactly why headings/
+    // links below are unaffected by the unclosed <p>/<div>.
+    const html = "<html><head></head><body><h1>Real Heading</h1><p>Unclosed paragraph<div>Nested wrong</div></body>";
+    expect(() => extractHtmlFacts(html)).not.toThrow();
+    const facts = extractHtmlFacts(html);
+    expect(facts.headings).toEqual([{ level: 1, text: "Real Heading" }]);
+  });
+
+  describe("Open Graph and Twitter Card tags", () => {
+    const html = `
+      <meta property="og:title" content="Best Plumbers">
+      <meta property="og:type" content="website">
+      <meta name="twitter:card" content="summary_large_image">
+      <meta name="description" content="Not an OG or Twitter tag">
+    `;
+
+    it("extracts only og: prefixed property meta tags", () => {
+      const tags = extractHtmlFacts(html).openGraphTags;
+      expect(tags).toEqual([
+        { key: "og:title", content: "Best Plumbers" },
+        { key: "og:type", content: "website" },
+      ]);
+    });
+
+    it("extracts only twitter: prefixed name meta tags", () => {
+      const tags = extractHtmlFacts(html).twitterCardTags;
+      expect(tags).toEqual([{ key: "twitter:card", content: "summary_large_image" }]);
+    });
+  });
+
+  describe("hreflang links", () => {
+    it("extracts alternate/hreflang link pairs", () => {
+      const html = `
+        <link rel="alternate" hreflang="en" href="https://example.com/en">
+        <link rel="alternate" hreflang="fr" href="https://example.com/fr">
+        <link rel="canonical" hreflang="x-default" href="https://example.com/">
+      `;
+      const links = extractHtmlFacts(html).hreflangLinks;
+      expect(links).toEqual([
+        { hreflang: "en", href: "https://example.com/en" },
+        { hreflang: "fr", href: "https://example.com/fr" },
+      ]);
+    });
+  });
+
+  describe("render-blocking resources", () => {
+    it("flags a head script with no async/defer as render-blocking", () => {
+      const html = `<head><script src="/blocking.js"></script></head>`;
+      expect(extractHtmlFacts(html).renderBlockingResources).toEqual([{ type: "script", url: "/blocking.js" }]);
+    });
+
+    it("does not flag async, defer, or module scripts", () => {
+      const html = `<head>
+        <script src="/a.js" async></script>
+        <script src="/b.js" defer></script>
+        <script src="/c.js" type="module"></script>
+      </head>`;
+      expect(extractHtmlFacts(html).renderBlockingResources).toEqual([]);
+    });
+
+    it("flags a head stylesheet link as render-blocking unless media=print", () => {
+      const html = `<head>
+        <link rel="stylesheet" href="/main.css">
+        <link rel="stylesheet" href="/print.css" media="print">
+      </head>`;
+      expect(extractHtmlFacts(html).renderBlockingResources).toEqual([{ type: "stylesheet", url: "/main.css" }]);
+    });
+
+    it("does not flag scripts/stylesheets outside <head>", () => {
+      const html = `<body><script src="/late.js"></script><link rel="stylesheet" href="/late.css"></body>`;
+      expect(extractHtmlFacts(html).renderBlockingResources).toEqual([]);
+    });
+  });
+
+  describe("structured data JSON parsing", () => {
+    it("parses valid JSON-LD and reports no error", () => {
+      const html = `<script type="application/ld+json">{"@type": "Organization", "name": "Ascent"}</script>`;
+      const [entry] = extractHtmlFacts(html).structuredData;
+      expect(entry?.parsed).toEqual({ "@type": "Organization", name: "Ascent" });
+      expect(entry?.parseError).toBeNull();
+    });
+
+    it("reports a parse error for invalid JSON without throwing", () => {
+      const html = `<script type="application/ld+json">{not valid json}</script>`;
+      const [entry] = extractHtmlFacts(html).structuredData;
+      expect(entry?.parsed).toBeNull();
+      expect(entry?.parseError).not.toBeNull();
+    });
+  });
 });

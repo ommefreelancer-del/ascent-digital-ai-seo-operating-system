@@ -47,11 +47,21 @@ export interface CoreWebVitalsSnapshot {
   readonly cls: number | null;
 }
 
+/** Real, measured Lighthouse category scores for the page, 0-100 (rounded), per category. `null` per-field means that category was not measured. */
+export interface LighthouseCategoryScores {
+  readonly performance: number | null;
+  readonly accessibility: number | null;
+  readonly bestPractices: number | null;
+  readonly seo: number | null;
+}
+
 export interface PerformanceData {
   readonly url: string;
   readonly rankings: readonly KeywordRankingSnapshot[];
   readonly traffic: TrafficSnapshot | null;
   readonly coreWebVitals: CoreWebVitalsSnapshot | null;
+  /** Real, measured Lighthouse category scores, or `null` if this provider doesn't supply them. */
+  readonly categoryScores: LighthouseCategoryScores | null;
   /** Which provider supplied this value, for traceability in the audit trail. */
   readonly source: string;
   readonly retrievedAt: string;

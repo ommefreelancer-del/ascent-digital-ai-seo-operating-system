@@ -11,6 +11,7 @@ function makePerformanceAnalytics(recommendations: PerformanceAnalyticsResult["r
     rankingInsights: [],
     trafficInsight: null,
     coreWebVitalInsights: [],
+    lighthouseCategoryScores: null,
     opportunities: [],
     roiInsight: null,
     recommendations,

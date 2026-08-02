@@ -9,6 +9,8 @@ import { KpiDashboardBuilder } from "../../../src/agents/client-reporting-agent/
 import { AchievementChallengeBuilder } from "../../../src/agents/client-reporting-agent/synthesis/achievement-challenge-builder.js";
 import { ClientRecommendationBuilder } from "../../../src/agents/client-reporting-agent/synthesis/client-recommendation-builder.js";
 import { ExecutiveSummaryBuilder } from "../../../src/agents/client-reporting-agent/synthesis/executive-summary-builder.js";
+import { ScoreCardBuilder } from "../../../src/agents/client-reporting-agent/synthesis/score-card-builder.js";
+import { PriorityMatrixBuilder } from "../../../src/agents/client-reporting-agent/synthesis/priority-matrix-builder.js";
 import { AuditLogger } from "../../../src/core/governance/audit-logger.js";
 import type { ApprovalChannel } from "../../../src/core/governance/approval-channel.js";
 import type { RoutingDecision } from "../../../src/boss-agent/types/routing.types.js";
@@ -76,6 +78,8 @@ describe("integration: a Boss Agent routing decision can be traced through to a 
       new AchievementChallengeBuilder(),
       new ClientRecommendationBuilder(),
       new ExecutiveSummaryBuilder(),
+      new ScoreCardBuilder(),
+      new PriorityMatrixBuilder(),
       approvalChannel,
       new AuditLogger(join(dir, "audit-log.jsonl")),
     );
@@ -87,6 +91,7 @@ describe("integration: a Boss Agent routing decision can be traced through to a 
       rankingInsights: [],
       trafficInsight: { organicSessions: 100, trend: "stable", conversions: null },
       coreWebVitalInsights: [],
+      lighthouseCategoryScores: null,
       opportunities: [],
       roiInsight: null,
       recommendations: [],

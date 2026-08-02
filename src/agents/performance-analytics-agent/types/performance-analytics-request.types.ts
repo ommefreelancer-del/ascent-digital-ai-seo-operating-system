@@ -11,6 +11,7 @@
 import type { KeywordResearchResult } from "../../keyword-research-agent/types/keyword-request.types.js";
 import type { WebsiteAuditResult } from "../../website-audit-agent/types/website-audit-request.types.js";
 import type { TechnicalSeoResult } from "../../technical-seo-agent/types/technical-seo-request.types.js";
+import type { LighthouseCategoryScores } from "./performance-data-provider.types.js";
 
 export interface PerformanceAnalyticsRequest {
   readonly id: string;
@@ -81,6 +82,8 @@ export interface PerformanceAnalyticsResult {
   readonly rankingInsights: readonly RankingInsight[];
   readonly trafficInsight: TrafficInsight | null;
   readonly coreWebVitalInsights: readonly CoreWebVitalInsight[];
+  /** Real, measured Lighthouse category scores (Performance/Accessibility/Best Practices/SEO), passed through unmodified from the provider. `null` when unavailable -- never estimated. */
+  readonly lighthouseCategoryScores: LighthouseCategoryScores | null;
   readonly opportunities: readonly PerformanceOpportunity[];
   readonly roiInsight: RoiInsight | null;
   readonly recommendations: readonly PerformanceRecommendation[];

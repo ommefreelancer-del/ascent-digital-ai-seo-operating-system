@@ -10,6 +10,7 @@ function makePerformanceAnalytics(overrides: Partial<PerformanceAnalyticsResult>
     rankingInsights: [],
     trafficInsight: null,
     coreWebVitalInsights: [],
+    lighthouseCategoryScores: null,
     opportunities: [],
     roiInsight: null,
     recommendations: [],

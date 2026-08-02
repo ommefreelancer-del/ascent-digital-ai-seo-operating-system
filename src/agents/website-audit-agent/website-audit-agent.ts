@@ -9,7 +9,7 @@
 //      escalate to a human via the same ApprovalChannel/AuditLogger
 //      primitives every other agent in this system uses, rather than
 //      silently producing a possibly-meaningless audit.
-//   5. Run all 9 structural checkers against the extracted facts.
+//   5. Run all structural checkers against the extracted facts.
 //   6. Compile findings + a severity summary + explicit scope limitations.
 //   7. Log "website_audit_completed" and return.
 //
@@ -41,6 +41,12 @@ import { InternalLinkChecker } from "./checks/internal-link-checker.js";
 import { ImageAltChecker } from "./checks/image-alt-checker.js";
 import { PageStructureChecker } from "./checks/page-structure-checker.js";
 import { TechnicalSeoChecker } from "./checks/technical-seo-checker.js";
+import { OpenGraphChecker } from "./checks/open-graph-checker.js";
+import { TwitterCardChecker } from "./checks/twitter-card-checker.js";
+import { StructuredDataValidationChecker } from "./checks/structured-data-validation-checker.js";
+import { SchemaTypeChecker } from "./checks/schema-type-checker.js";
+import { AccessibilityChecker } from "./checks/accessibility-checker.js";
+import { MobileFriendlinessChecker } from "./checks/mobile-friendliness-checker.js";
 import type { WebsiteAuditRequest, WebsiteAuditResult } from "./types/website-audit-request.types.js";
 
 const PROCEED_CANDIDATE_ID = "proceed";
@@ -56,6 +62,12 @@ function defaultCheckers(): AuditChecker[] {
     new ImageAltChecker(),
     new PageStructureChecker(),
     new TechnicalSeoChecker(),
+    new OpenGraphChecker(),
+    new TwitterCardChecker(),
+    new StructuredDataValidationChecker(),
+    new SchemaTypeChecker(),
+    new AccessibilityChecker(),
+    new MobileFriendlinessChecker(),
   ];
 }
 

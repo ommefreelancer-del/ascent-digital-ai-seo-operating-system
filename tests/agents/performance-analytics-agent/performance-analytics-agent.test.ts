@@ -129,6 +129,7 @@ describe("PerformanceAnalyticsAgent", () => {
     expect(result.rankingInsights).toHaveLength(0);
     expect(result.trafficInsight).toBeNull();
     expect(result.coreWebVitalInsights).toHaveLength(0);
+    expect(result.lighthouseCategoryScores).toBeNull();
     expect(result.roiInsight).toBeNull();
     expect(result.opportunities).toHaveLength(0);
     expect(result.recommendations).toHaveLength(0);
@@ -155,6 +156,7 @@ describe("PerformanceAnalyticsAgent", () => {
       rankings: [{ keyword: "plumber", position: 15, previousPosition: 20, impressions: 500, clicks: 20, ctr: 0.04 }],
       traffic: { organicSessions: 200, previousOrganicSessions: 150, conversions: 10, averageConversionValue: 75 },
       coreWebVitals: { lcpMs: 3000, inpMs: 150, cls: 0.05 },
+      categoryScores: { performance: 82, accessibility: 95, bestPractices: 90, seo: 100 },
       source: "fixed-test-provider",
       retrievedAt: new Date().toISOString(),
     };
@@ -167,6 +169,7 @@ describe("PerformanceAnalyticsAgent", () => {
     expect(result.rankingInsights[0]).toMatchObject({ isPageOneOpportunity: true, trend: "improving" });
     expect(result.trafficInsight).toMatchObject({ trend: "improving", conversions: 10 });
     expect(result.coreWebVitalInsights.find((v) => v.metric === "LCP")?.passesThreshold).toBe(false);
+    expect(result.lighthouseCategoryScores).toEqual({ performance: 82, accessibility: 95, bestPractices: 90, seo: 100 });
     expect(result.roiInsight).toMatchObject({ conversions: 10, averageConversionValue: 75, estimatedRevenue: 750 });
     expect(result.opportunities.length).toBeGreaterThan(0);
     expect(result.recommendations.length).toBeGreaterThan(0);
@@ -187,6 +190,7 @@ describe("PerformanceAnalyticsAgent", () => {
       rankings: [{ keyword: "plumber", position: 5, previousPosition: 5, impressions: 100, clicks: 10, ctr: 0.1 }],
       traffic: null,
       coreWebVitals: null,
+      categoryScores: null,
       source: "fixed-test-provider",
       retrievedAt: new Date().toISOString(),
     };
@@ -222,6 +226,7 @@ describe("PerformanceAnalyticsAgent", () => {
       rankings: [{ keyword: "plumber", position: 5, previousPosition: 5, impressions: 100, clicks: 10, ctr: 0.1 }],
       traffic: null,
       coreWebVitals: null,
+      categoryScores: null,
       source: "fixed-test-provider",
       retrievedAt: new Date().toISOString(),
     };

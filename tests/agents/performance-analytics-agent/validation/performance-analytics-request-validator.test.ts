@@ -59,6 +59,7 @@ function makePerformanceData(overrides: Partial<PerformanceData> = {}): Performa
     rankings: [],
     traffic: null,
     coreWebVitals: null,
+    categoryScores: null,
     source: "test-provider",
     retrievedAt: new Date().toISOString(),
     ...overrides,

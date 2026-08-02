@@ -8,6 +8,8 @@ import { KpiDashboardBuilder } from "../../../src/agents/client-reporting-agent/
 import { AchievementChallengeBuilder } from "../../../src/agents/client-reporting-agent/synthesis/achievement-challenge-builder.js";
 import { ClientRecommendationBuilder } from "../../../src/agents/client-reporting-agent/synthesis/client-recommendation-builder.js";
 import { ExecutiveSummaryBuilder } from "../../../src/agents/client-reporting-agent/synthesis/executive-summary-builder.js";
+import { ScoreCardBuilder } from "../../../src/agents/client-reporting-agent/synthesis/score-card-builder.js";
+import { PriorityMatrixBuilder } from "../../../src/agents/client-reporting-agent/synthesis/priority-matrix-builder.js";
 import { AuditLogger } from "../../../src/core/governance/audit-logger.js";
 import type { ApprovalChannel } from "../../../src/core/governance/approval-channel.js";
 import type { ApprovalDecision } from "../../../src/core/types/approval.types.js";
@@ -35,6 +37,7 @@ function makePerformanceAnalytics(overrides: Partial<PerformanceAnalyticsResult>
     rankingInsights: [],
     trafficInsight: { organicSessions: 420, trend: "improving", conversions: 8 },
     coreWebVitalInsights: [],
+    lighthouseCategoryScores: null,
     opportunities: [],
     roiInsight: null,
     recommendations: [{ category: "ranking", priority: "high", recommendation: "Close the gap.", rationale: "x" }],
@@ -96,6 +99,8 @@ describe("ClientReportingAgent", () => {
       new AchievementChallengeBuilder(),
       new ClientRecommendationBuilder(),
       new ExecutiveSummaryBuilder(),
+      new ScoreCardBuilder(),
+      new PriorityMatrixBuilder(),
       makeApprovalChannel(approvalDecision),
       new AuditLogger(auditLogPath),
     );

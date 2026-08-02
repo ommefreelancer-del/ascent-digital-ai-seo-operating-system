@@ -156,6 +156,7 @@ export class PerformanceAnalyticsAgent {
       rankingInsights,
       trafficInsight,
       coreWebVitalInsights,
+      lighthouseCategoryScores: performanceData?.categoryScores ?? null,
       opportunities,
       roiInsight,
       recommendations,
