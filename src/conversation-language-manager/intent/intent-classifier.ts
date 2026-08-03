@@ -9,8 +9,19 @@ import type { ConversationIntent } from "../types/conversation.types.js";
 
 const MIN_WORDS_FOR_TASK_REQUEST = 3;
 
+// A real URL is unambiguous, structured input on its own -- e.g. "Audit
+// https://example.com" is only 2 whitespace-separated tokens (the URL itself
+// contains no spaces), but it names an exact, actionable target. Requiring
+// this doesn't fabricate intent; it recognizes content the word-count
+// heuristic alone can't see.
+const URL_PATTERN = /https?:\/\/[^\s)>\]"']+/i;
+
 export class IntentClassifier {
   classify(message: string): ConversationIntent {
+    if (URL_PATTERN.test(message)) {
+      return "task_request";
+    }
+
     const wordCount = message
       .trim()
       .split(/\s+/)

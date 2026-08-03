@@ -13,10 +13,24 @@ import { truncate } from "@/lib/utils";
 // WEBSITE_AUDIT_AGENT_ID for the canonical backend constant this mirrors).
 const WEBSITE_AUDIT_AGENT_ID = "website-audit-agent";
 const URL_PATTERN = /https?:\/\/[^\s)>\]"']+/i;
+// Fallback for a URL typed without a protocol ("audit example.com"). Deliberately
+// conservative: requires a real-looking multi-label domain with a letters-only
+// TLD, so it won't fire on ordinary prose like "e.g." or "v1.2". Common
+// non-domain file extensions are excluded so "main.js" or "notes.md" don't get
+// misread as a website to crawl.
+const BARE_DOMAIN_PATTERN = /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,}[a-z]{2,}(?:\/[^\s)>\]"']*)?\b/i;
+const NON_DOMAIN_TLDS = new Set(["js", "ts", "tsx", "jsx", "py", "md", "txt", "json", "css", "html", "go", "rb", "php", "yml", "yaml"]);
 
 function extractUrl(text: string): string | null {
-  const match = text.match(URL_PATTERN);
-  return match ? match[0].replace(/[.,;:]+$/, "") : null;
+  const withProtocol = text.match(URL_PATTERN);
+  if (withProtocol) return withProtocol[0].replace(/[.,;:]+$/, "");
+
+  const bare = text.match(BARE_DOMAIN_PATTERN);
+  if (!bare) return null;
+  const candidate = bare[0].replace(/[.,;:]+$/, "");
+  const tld = candidate.split("/")[0]?.split(".").pop()?.toLowerCase();
+  if (!tld || NON_DOMAIN_TLDS.has(tld)) return null;
+  return `https://${candidate}`;
 }
 
 /** Builds a reply straight from real FullAuditResult fields -- no LLM, no fabrication, every number traceable to the pipeline that produced it. */
