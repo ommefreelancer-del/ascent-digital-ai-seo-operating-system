@@ -39,19 +39,23 @@ export interface ConversationSession {
 
 /**
  * "task_request" -- the message carries enough real content to package and
- * route. "clarification_needed" -- per the architecture doc's own Intent
- * Detection responsibility ("Whether additional clarification is
- * required"), a message too short to route is never guessed at; the user is
- * asked for more detail instead.
+ * route to a specialist agent via the Boss Agent. "clarification_needed" --
+ * per the architecture doc's own Intent Detection responsibility ("Whether
+ * additional clarification is required"), a message too short to route is
+ * never guessed at; the user is asked for more detail instead.
+ * "boss_agent_meta_request" -- the message is about the Boss Agent's own
+ * routing/orchestration behavior (see routing/boss-agent-meta-request-detector.ts),
+ * not a task for any specialist; the Boss Agent is never called, so no
+ * specialist can be assigned.
  */
-export type ConversationIntent = "task_request" | "clarification_needed";
+export type ConversationIntent = "task_request" | "clarification_needed" | "boss_agent_meta_request";
 
 export interface ConversationResponse {
   readonly sessionId: string;
   readonly language: SupportedLanguage;
   readonly intent: ConversationIntent;
   readonly reply: string;
-  /** `null` when intent is "clarification_needed": the Boss Agent was never called. */
+  /** `null` when intent is "clarification_needed" or "boss_agent_meta_request": the Boss Agent was never called. */
   readonly routingDecision: RoutingDecision | null;
   readonly decidedAt: string;
 }

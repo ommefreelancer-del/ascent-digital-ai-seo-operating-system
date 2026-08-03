@@ -14,7 +14,7 @@ import { CliApprovalChannel } from "../core/governance/cli-approval-channel.js";
 import { AuditLogger } from "../core/governance/audit-logger.js";
 import type { ApprovalChannel } from "../core/governance/approval-channel.js";
 import { AgentRegistry, type AgentDirectory } from "./registry/agent-registry.js";
-import { KeywordMatchRoutingStrategy } from "./routing/keyword-match-routing-strategy.js";
+import { TagWeightedRoutingStrategy } from "./routing/tag-weighted-routing-strategy.js";
 import { TaskRouter } from "./routing/task-router.js";
 import { ComplianceValidator } from "./governance/compliance-validator.js";
 import { EscalationHandler } from "./governance/escalation-handler.js";
@@ -50,7 +50,12 @@ export class BossAgent {
    */
   static async create(config: BossAgentConfig): Promise<BossAgent> {
     const registry = await AgentRegistry.load(config.agentsDirectory);
-    const strategy = new KeywordMatchRoutingStrategy();
+    // TagWeightedRoutingStrategy blends keyword-overlap with the optional
+    // Tags/Capabilities spec sections; it degrades to identical behavior for
+    // any agent that hasn't declared tags yet (see the strategy's own
+    // comment). KeywordMatchRoutingStrategy remains available for direct use
+    // (e.g. in tests, or as an explicit fallback).
+    const strategy = new TagWeightedRoutingStrategy(registry.list());
     const router = new TaskRouter(registry, strategy, {
       autoAssignThreshold: config.autoAssignThreshold,
       tieMargin: config.tieMargin,

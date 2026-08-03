@@ -77,7 +77,7 @@ async function getClm(): Promise<ClmBundle> {
       );
 
       const registry = await AgentRegistry.load(bossConfig.agentsDirectory);
-      const routingStrategy = new TagWeightedRoutingStrategy();
+      const routingStrategy = new TagWeightedRoutingStrategy(registry.list());
       const taskRouter = new TaskRouter(registry, routingStrategy, {
         autoAssignThreshold: bossConfig.autoAssignThreshold,
         tieMargin: bossConfig.tieMargin,

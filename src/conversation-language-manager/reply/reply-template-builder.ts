@@ -18,6 +18,22 @@ export class ReplyTemplateBuilder {
       : "Could you share a bit more detail so I can route this accurately?";
   }
 
+  /**
+   * For messages about the Boss Agent's own routing/orchestration behavior
+   * (see routing/boss-agent-meta-request-detector.ts). Handled directly here
+   * rather than routed, since no specialist agent has routing logs,
+   * confidence scores, or registry access -- only the Boss Agent does. Does
+   * not fabricate specific numbers or logs that aren't actually being
+   * surfaced by this reply; points to where real per-request routing detail
+   * (candidates considered, matched terms, confidence score) is genuinely
+   * shown -- the routing decision returned alongside every task request.
+   */
+  bossAgentMeta(language: SupportedLanguage): string {
+    return language === "ur"
+      ? "یہ درخواست Boss Agent کے اپنے routing نظام کے بارے میں معلوم ہوتی ہے، اس لیے میں اسے کسی specialist ایجنٹ کو نہیں بھیج رہا -- کوئی بھی specialist ایجنٹ کے پاس routing logs، confidence scores، یا registry تک رسائی نہیں ہے۔ ہر حقیقی task request کے ساتھ Boss Agent کا اصل routing decision (منتخب کردہ candidates، matched terms، اور confidence score سمیت) اسی جواب میں دکھایا جاتا ہے -- یہاں سے مزید معلومات دیکھی جا سکتی ہیں۔"
+      : "This looks like it's about the Boss Agent's own routing system, so I'm handling it directly rather than forwarding it to a specialist agent -- no specialist has routing logs, confidence scores, or registry access. The Boss Agent's real routing decision (candidates considered, matched terms, and confidence score) is shown alongside every actual task request you send; that's where the real routing detail for a specific request lives.";
+  }
+
   routing(decision: RoutingDecision, language: SupportedLanguage): string {
     if (decision.status === "assigned") {
       return language === "ur"

@@ -24,7 +24,8 @@ async function importBackend(relativeToSrc: string) {
 interface BossAgentModules {
   readonly BossAgent: any;
   readonly registry: any;
-  readonly TagWeightedRoutingStrategy: any;
+  /** Constructed once, over the real registry, so its term-rarity (IDF) weighting reflects the actual full agent corpus -- see tag-weighted-routing-strategy.ts. */
+  readonly routingStrategy: any;
   readonly TaskRouter: any;
   readonly ComplianceValidator: any;
   readonly EscalationHandler: any;
@@ -62,8 +63,9 @@ async function getModules(): Promise<BossAgentModules> {
       );
 
       const registry = await AgentRegistry.load(config.agentsDirectory);
+      const routingStrategy = new TagWeightedRoutingStrategy(registry.list());
 
-      return { BossAgent, registry, TagWeightedRoutingStrategy, TaskRouter, ComplianceValidator, EscalationHandler, TaskStateStore, AuditLogger, config };
+      return { BossAgent, registry, routingStrategy, TaskRouter, ComplianceValidator, EscalationHandler, TaskStateStore, AuditLogger, config };
     })();
   }
   return modulesPromise;
@@ -79,8 +81,7 @@ export async function routeTask(description: string, priority: "high" | "normal"
   const m = await getModules();
   const escalations: RecordedEscalation[] = [];
 
-  const routingStrategy = new m.TagWeightedRoutingStrategy();
-  const taskRouter = new m.TaskRouter(m.registry, routingStrategy, {
+  const taskRouter = new m.TaskRouter(m.registry, m.routingStrategy, {
     autoAssignThreshold: m.config.autoAssignThreshold,
     tieMargin: m.config.tieMargin,
     maxCandidates: m.config.maxCandidates,

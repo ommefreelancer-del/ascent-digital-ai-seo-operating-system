@@ -38,6 +38,7 @@ import type { ConversationLanguageManagerConfig } from "./config/conversation-la
 import { ConversationRequestValidator } from "./validation/conversation-request-validator.js";
 import { LanguageDetector } from "./language/language-detector.js";
 import { IntentClassifier } from "./intent/intent-classifier.js";
+import { BossAgentMetaRequestDetector } from "./routing/boss-agent-meta-request-detector.js";
 import { ReplyTemplateBuilder } from "./reply/reply-template-builder.js";
 import { InMemoryConversationSessionStore, type ConversationSessionStore } from "./session/conversation-session-store.js";
 import type { BossAgentGateway, ConversationRequest, ConversationResponse } from "./types/conversation.types.js";
@@ -49,6 +50,7 @@ export class ConversationLanguageManager {
     private readonly validator: ConversationRequestValidator,
     private readonly languageDetector: LanguageDetector,
     private readonly intentClassifier: IntentClassifier,
+    private readonly metaRequestDetector: BossAgentMetaRequestDetector,
     private readonly replyTemplateBuilder: ReplyTemplateBuilder,
     private readonly sessionStore: ConversationSessionStore,
     private readonly bossAgentGateway: BossAgentGateway,
@@ -66,6 +68,7 @@ export class ConversationLanguageManager {
       new ConversationRequestValidator(),
       new LanguageDetector(),
       new IntentClassifier(),
+      new BossAgentMetaRequestDetector(),
       new ReplyTemplateBuilder(),
       sessionStore,
       bossAgentGateway,
@@ -114,6 +117,26 @@ export class ConversationLanguageManager {
 
     const now = new Date().toISOString();
     this.sessionStore.appendTurn(request.sessionId, { role: "user", text: request.message, occurredAt: now });
+
+    if (this.metaRequestDetector.isMetaRequest(request.message)) {
+      const reply = this.replyTemplateBuilder.bossAgentMeta(language);
+      this.sessionStore.appendTurn(request.sessionId, { role: "assistant", text: reply, occurredAt: new Date().toISOString() });
+
+      await this.auditLogger.logEvent({
+        actor: "conversation-language-manager",
+        eventType: "conversation_message_handled",
+        details: { sessionId: request.sessionId, intent: "boss_agent_meta_request", routedToBossAgent: false },
+      });
+
+      return {
+        sessionId: request.sessionId,
+        language,
+        intent: "boss_agent_meta_request",
+        reply,
+        routingDecision: null,
+        decidedAt: new Date().toISOString(),
+      };
+    }
 
     const intent = this.intentClassifier.classify(request.message);
 

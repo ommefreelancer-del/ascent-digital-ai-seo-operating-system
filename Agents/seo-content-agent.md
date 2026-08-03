@@ -59,3 +59,16 @@ Sends: On-Page SEO Agent, Boss Agent
 - Brand voice is maintained.
 - Recommendations support higher rankings and conversions.
 - Deliverables are publication-ready.
+
+## Tags
+- content-generation
+- ai-article-generation
+- blog-writing
+- meta-titles
+- faq-generation
+
+## Capabilities
+- Write blog posts, guest posts, and website content drafts
+- Generate meta titles and meta descriptions
+- Generate FAQ content
+- Optimize content for target keywords

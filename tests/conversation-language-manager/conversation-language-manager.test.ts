@@ -6,6 +6,7 @@ import { ConversationLanguageManager } from "../../src/conversation-language-man
 import { ConversationRequestValidator } from "../../src/conversation-language-manager/validation/conversation-request-validator.js";
 import { LanguageDetector } from "../../src/conversation-language-manager/language/language-detector.js";
 import { IntentClassifier } from "../../src/conversation-language-manager/intent/intent-classifier.js";
+import { BossAgentMetaRequestDetector } from "../../src/conversation-language-manager/routing/boss-agent-meta-request-detector.js";
 import { ReplyTemplateBuilder } from "../../src/conversation-language-manager/reply/reply-template-builder.js";
 import { InMemoryConversationSessionStore } from "../../src/conversation-language-manager/session/conversation-session-store.js";
 import { AuditLogger } from "../../src/core/governance/audit-logger.js";
@@ -73,6 +74,7 @@ describe("ConversationLanguageManager", () => {
       new ConversationRequestValidator(),
       new LanguageDetector(),
       new IntentClassifier(),
+      new BossAgentMetaRequestDetector(),
       new ReplyTemplateBuilder(),
       new InMemoryConversationSessionStore(),
       gateway,
@@ -115,6 +117,49 @@ describe("ConversationLanguageManager", () => {
     expect(gateway.receivedTasks).toHaveLength(0);
   });
 
+  it("handles a Boss Agent / routing meta-request directly and never calls the gateway", async () => {
+    const gateway = new FakeBossAgentGateway(makeDecision());
+    const { manager, auditLogPath } = buildManager(gateway);
+
+    const response = await manager.handleMessage(makeRequest({ message: "Explain why routing failed." }));
+
+    expect(response.intent).toBe("boss_agent_meta_request");
+    expect(response.routingDecision).toBeNull();
+    expect(response.reply).toMatch(/routing/i);
+    expect(gateway.receivedTasks).toHaveLength(0);
+    expect(await readEventTypes(auditLogPath)).toEqual(["conversation_message_received", "conversation_message_handled"]);
+  });
+
+  it("recognizes every documented trigger term as a meta-request, never forwarded to the gateway", async () => {
+    const triggers = [
+      "Debug Boss Agent.",
+      "Show routing decision.",
+      "How does the orchestrator work?",
+      "What does the classifier do?",
+      "How big is the agent registry?",
+      "What is your confidence for this?",
+      "Please debug routing for me.",
+    ];
+    for (const message of triggers) {
+      const gateway = new FakeBossAgentGateway(makeDecision());
+      const { manager } = buildManager(gateway);
+      const response = await manager.handleMessage(makeRequest({ message }));
+      expect(gateway.receivedTasks, `expected "${message}" to never reach the gateway`).toHaveLength(0);
+      expect(response.intent).toBe("boss_agent_meta_request");
+    }
+  });
+
+  it("still routes an ordinary task request that happens not to mention any trigger term", async () => {
+    const decision = makeDecision({ assignedAgentId: "keyword-research-agent" });
+    const gateway = new FakeBossAgentGateway(decision);
+    const { manager } = buildManager(gateway);
+
+    const response = await manager.handleMessage(makeRequest({ message: "Research keywords for AI automation." }));
+
+    expect(response.intent).toBe("task_request");
+    expect(gateway.receivedTasks).toHaveLength(1);
+  });
+
   it("detects Urdu and replies in Urdu when the message is written in Urdu script", async () => {
     const gateway = new FakeBossAgentGateway(makeDecision());
     const { manager } = buildManager(gateway);
@@ -140,6 +185,7 @@ describe("ConversationLanguageManager", () => {
       new ConversationRequestValidator(),
       new LanguageDetector(),
       new IntentClassifier(),
+      new BossAgentMetaRequestDetector(),
       new ReplyTemplateBuilder(),
       sessionStore,
       gateway,
