@@ -118,4 +118,61 @@ describe("TagWeightedRoutingStrategy (real Agents/ directory)", () => {
     expect(decision.status).toBe("assigned");
     expect(decision.assignedAgentId).toBe("guest-posting-digital-pr-agent");
   });
+
+  // REGRESSION: a real, live test found "Generate content for my Services
+  // page." routing to website-audit-agent (0.88) instead of seo-content-agent
+  // (0.59) -- website-audit-agent's spec incidentally uses "generate"
+  // ("Generate a prioritized audit report"), "content" ("duplicate content"),
+  // and "page" ("page performance") in senses unrelated to content authoring.
+  // The remaining cases in this block are the fix's own required test suite
+  // (write/create/generate/draft + article/blog/content should always win
+  // for the content agent) plus proof the "Generate a guest post." case
+  // above still isn't hijacked by the new signal.
+  describe("content-authoring intent (write/create/generate/draft + article/blog/content)", () => {
+    async function routeContent(description: string) {
+      const registry = await AgentRegistry.load(join(REPO_ROOT, "Agents"));
+      const config = loadBossAgentConfig({}, REPO_ROOT);
+      const router = new TaskRouter(registry, new TagWeightedRoutingStrategy(registry.list()), {
+        autoAssignThreshold: config.autoAssignThreshold,
+        tieMargin: config.tieMargin,
+        maxCandidates: config.maxCandidates,
+      });
+      return router.route({ id: "content-task", priority: "normal", description });
+    }
+
+    it("routes 'Generate content for my Services page.' to seo-content-agent instead of website-audit-agent", async () => {
+      const decision = await routeContent("Generate content for my Services page.");
+      expect(decision.status).toBe("assigned");
+      expect(decision.assignedAgentId).toBe("seo-content-agent");
+    });
+
+    it("cleanly assigns 'Create an article about AI Automation.' instead of escalating", async () => {
+      const decision = await routeContent("Create an article about AI Automation.");
+      expect(decision.status).toBe("assigned");
+      expect(decision.assignedAgentId).toBe("seo-content-agent");
+    });
+
+    it("routes 'Write a production-ready SEO blog for my portfolio website.' to seo-content-agent", async () => {
+      const decision = await routeContent("Write a production-ready SEO blog for my portfolio website.");
+      expect(decision.status).toBe("assigned");
+      expect(decision.assignedAgentId).toBe("seo-content-agent");
+    });
+
+    it("does not let the new signal hijack 'Generate a guest post.' away from guest-posting-digital-pr-agent", async () => {
+      // No noun from {article, blog, content} appears here -- only "guest"/
+      // "post", which are guest-posting-digital-pr-agent's own vocabulary.
+      const decision = await routeContent("Generate a guest post.");
+      expect(decision.status).toBe("assigned");
+      expect(decision.assignedAgentId).toBe("guest-posting-digital-pr-agent");
+    });
+
+    it("does not let the new signal hijack a real website-audit request", async () => {
+      // No authoring verb (write/create/generate/draft) appears here.
+      const decision = await routeContent(
+        "Run a comprehensive SEO audit of our website: crawl every page, check Core Web Vitals, validate structured data, and find broken links.",
+      );
+      expect(decision.status).toBe("assigned");
+      expect(decision.assignedAgentId).toBe("website-audit-agent");
+    });
+  });
 });

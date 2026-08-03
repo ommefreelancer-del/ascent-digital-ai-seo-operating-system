@@ -39,6 +39,38 @@ import { toTermSet } from "./keyword-match-routing-strategy.js";
 const KEYWORD_WEIGHT = 0.4;
 const TAG_WEIGHT = 0.6;
 
+// REGRESSION: a real, live test found "Generate content for my Services
+// page." routing to website-audit-agent (score 0.88) instead of
+// seo-content-agent (0.59) -- website-audit-agent's spec incidentally uses
+// "generate" ("Generate a prioritized audit report"), "content" ("duplicate
+// content"), and "page" ("page performance") in senses that have nothing to
+// do with authoring content, and the plain term-overlap ratio can't tell the
+// difference. Content-authoring intent is only real when an authoring VERB
+// and a content-type NOUN appear together -- e.g. "generate content", "write
+// a blog", "create an article" -- not from either word alone, since a bare
+// verb like "generate" or "write" is common across many unrelated specs
+// ("Generate a guest post." legitimately belongs to
+// guest-posting-digital-pr-agent, which has its own specific "guest"/"post"
+// vocabulary; requiring the noun pairing here leaves that routing untouched).
+// When the pairing is present, seo-content-agent's score is set to the
+// maximum (1) -- matchedTerms stays exactly what was actually matched, so
+// the rationale never claims a term wasn't really present (GLOBAL_RULES.md
+// SS2 Anti-Hallucination); only the numeric score is overridden.
+const CONTENT_AUTHORING_VERBS = new Set(["write", "create", "generate", "draft"]);
+const CONTENT_AUTHORING_NOUNS = new Set(["article", "blog", "content"]);
+const CONTENT_AGENT_ID = "seo-content-agent";
+
+function hasContentAuthoringIntent(taskTerms: ReadonlySet<string>): boolean {
+  let hasVerb = false;
+  let hasNoun = false;
+  for (const term of taskTerms) {
+    if (CONTENT_AUTHORING_VERBS.has(term)) hasVerb = true;
+    if (CONTENT_AUTHORING_NOUNS.has(term)) hasNoun = true;
+    if (hasVerb && hasNoun) return true;
+  }
+  return false;
+}
+
 export class TagWeightedRoutingStrategy implements RoutingStrategy {
   readonly name = "tag-weighted";
 
@@ -68,6 +100,8 @@ export class TagWeightedRoutingStrategy implements RoutingStrategy {
       return { agentId: candidate.id, agentTitle: candidate.title, score: 0, matchedTerms: [] };
     }
 
+    const contentAuthoringIntent = candidate.id === CONTENT_AGENT_ID && hasContentAuthoringIntent(taskTerms);
+
     const keywordTerms = this.getKeywordTerms(candidate);
     const matchedKeywordTerms = new Set(Array.from(taskTerms).filter((term) => keywordTerms.has(term)));
     const keywordScore = this.weightedRatio(matchedKeywordTerms, taskTerms, this.keywordIdf);
@@ -80,7 +114,7 @@ export class TagWeightedRoutingStrategy implements RoutingStrategy {
       return {
         agentId: candidate.id,
         agentTitle: candidate.title,
-        score: keywordScore,
+        score: contentAuthoringIntent ? 1 : keywordScore,
         matchedTerms: Array.from(matchedKeywordTerms).sort(),
       };
     }
@@ -88,7 +122,7 @@ export class TagWeightedRoutingStrategy implements RoutingStrategy {
     const matchedTagTerms = new Set(Array.from(taskTerms).filter((term) => tagTerms.has(term)));
     const tagScore = this.weightedRatio(matchedTagTerms, taskTerms, this.tagIdf);
 
-    const combinedScore = Math.min(1, KEYWORD_WEIGHT * keywordScore + TAG_WEIGHT * tagScore);
+    const combinedScore = contentAuthoringIntent ? 1 : Math.min(1, KEYWORD_WEIGHT * keywordScore + TAG_WEIGHT * tagScore);
     const matchedTerms = Array.from(new Set([...matchedKeywordTerms, ...matchedTagTerms])).sort();
 
     return { agentId: candidate.id, agentTitle: candidate.title, score: combinedScore, matchedTerms };
