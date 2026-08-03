@@ -5,6 +5,7 @@ import { chatMessageSchema } from "@/lib/validators";
 import { sendConversationMessage, getSpecialistAgentSpec } from "@/server/backend/conversation";
 import { generateSpecialistReply } from "@/server/backend/specialist-ai";
 import { runFullAudit, type FullAuditResult } from "@/server/backend/website-audit";
+import { runContentGenerationPipeline, CONTENT_PIPELINE_ENTRY_AGENT_ID, type PipelineStepTrace } from "@/server/backend/specialist-orchestrator";
 import { logActivity } from "@/server/log-activity";
 import { truncate } from "@/lib/utils";
 
@@ -113,6 +114,12 @@ export async function POST(request: Request) {
     //     headers, Lighthouse, schema, links, accessibility) and reply with
     //     its real, evidence-based output. No LLM involved in producing the
     //     findings -- every number traces directly to the pipeline.
+    //   - SEO Content Agent -> run the real automatic multi-agent content
+    //     pipeline (specialist-orchestrator.ts): Keyword Research -> SEO
+    //     Strategy -> SEO Content -> On-Page SEO (internal linking + meta) ->
+    //     Guest Posting (only when requested). Each stage's real output is
+    //     fed to the next as already-provided context, so the content agent
+    //     never has to ask the user for data another specialist can supply.
     //   - Everything else -> ask Claude to role-play that specialist agent's
     //     real Agents/*.md spec, as before. If no API key is configured or
     //     the call fails, fall back to the routing-only reply rather than
@@ -120,6 +127,7 @@ export async function POST(request: Request) {
     let assistantContent = response.reply;
     let auditResult: FullAuditResult | null = null;
     let auditUrl: string | null = null;
+    let pipelineTrace: readonly PipelineStepTrace[] | null = null;
 
     if (decision?.status === "assigned" && decision.assignedAgentId === WEBSITE_AUDIT_AGENT_ID) {
       auditUrl = extractUrl(message);
@@ -132,6 +140,15 @@ export async function POST(request: Request) {
       } catch (error) {
         const reason = error instanceof Error ? error.message : "The audit could not be completed.";
         assistantContent = `I tried to run a live audit on ${auditUrl} through ADASOS's production pipeline, but it failed: ${reason}`;
+      }
+    } else if (decision?.status === "assigned" && decision.assignedAgentId === CONTENT_PIPELINE_ENTRY_AGENT_ID) {
+      try {
+        const pipelineResult = await runContentGenerationPipeline(message, decision.rationale);
+        assistantContent = pipelineResult.finalReply;
+        pipelineTrace = pipelineResult.trace;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "an unknown error";
+        assistantContent = `${response.reply}\n\n(The automated content pipeline could not complete: ${reason})`;
       }
     } else if (decision?.status === "assigned" && decision.assignedAgentId) {
       try {
@@ -171,7 +188,7 @@ export async function POST(request: Request) {
         content: assistantContent,
         agentId: decision?.assignedAgentId ?? null,
         status: decision?.status ?? null,
-        metaJson: JSON.stringify({ routingDecision: decision, escalations, seoAuditId }),
+        metaJson: JSON.stringify({ routingDecision: decision, escalations, seoAuditId, pipelineTrace }),
       },
     });
 
