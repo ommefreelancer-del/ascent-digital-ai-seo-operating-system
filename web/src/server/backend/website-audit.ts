@@ -95,6 +95,10 @@ export interface CrawledPageSummary {
   readonly url: string;
   readonly status: number | null;
   readonly error: string | null;
+  /** The verified, classified outcome of this page's crawl attempt (e.g. "success", "http_error", "dns_failure", "ssl_failure", "timeout", "connection_failure", "robots_blocked", "invalid_html") -- never a guess. */
+  readonly outcome?: string;
+  readonly contentType?: string | null;
+  readonly durationMs?: number | null;
 }
 
 export interface CrawlSummary {
@@ -127,6 +131,75 @@ export interface FullAuditResult {
 
 const MAX_CRAWL_PAGES = 15;
 
+export interface RawCrawledPage {
+  readonly url: string;
+  readonly finalUrl: string | null;
+  readonly status: number | null;
+  readonly error: string | null;
+  readonly headers: Readonly<Record<string, string>> | null;
+  readonly contentType?: string | null;
+  readonly outcome?: string;
+  readonly durationMs?: number | null;
+  readonly redirectChain?: readonly string[];
+}
+
+/**
+ * Builds a real, verified, multi-line diagnostic report from the actual
+ * crawl evidence -- never a generic "possible causes" message. Every line
+ * corresponds to a field the crawler genuinely measured (HTTP status,
+ * content-type, redirect chain, classified failure category, fetch
+ * duration); nothing here is guessed. Anti-hallucination requirement: if a
+ * fact wasn't captured, it's simply omitted, never invented.
+ */
+export function buildCrawlFailureDiagnostic(requestedUrl: string, crawlResult: { robotsTxtContent: string | null; sitemapUrls: readonly string[]; limitations: readonly string[] }, page: RawCrawledPage | null, crawlDurationMs: number): string {
+  const lines: string[] = [`Website Audit could not analyze ${requestedUrl}. Verified diagnostics from the real crawl:`, ""];
+
+  if (!page) {
+    lines.push("- No page was ever fetched -- the crawl produced zero results before any request could complete.");
+  } else {
+    lines.push(`- Requested URL: ${page.url}`);
+    if (page.finalUrl && page.finalUrl !== page.url) lines.push(`- Final URL after redirects: ${page.finalUrl}`);
+    if (page.redirectChain && page.redirectChain.length > 1) lines.push(`- Redirect chain: ${page.redirectChain.join(" -> ")}`);
+    if (page.status !== null && page.status !== undefined) lines.push(`- HTTP status: ${page.status}`);
+    if (page.contentType) lines.push(`- Content-Type: ${page.contentType}`);
+    if (page.outcome) lines.push(`- Verified outcome: ${page.outcome}`);
+    if (page.durationMs !== null && page.durationMs !== undefined) lines.push(`- Fetch duration: ${page.durationMs}ms`);
+    lines.push(`- Exact reason: ${page.error ?? "The page was fetched successfully but WebsiteAuditAgent rejected the content -- see limitations below."}`);
+  }
+
+  lines.push(
+    "",
+    `- robots.txt: ${crawlResult.robotsTxtContent !== null ? "found and checked" : "not found or could not be fetched"}`,
+    `- sitemap.xml: ${crawlResult.sitemapUrls.length} URL(s) discovered`,
+    `- Total crawl duration: ${crawlDurationMs}ms`,
+  );
+  if (crawlResult.limitations.length > 0) {
+    lines.push("", "Crawl limitations:");
+    for (const l of crawlResult.limitations) lines.push(`  - ${l}`);
+  }
+  return lines.join("\n");
+}
+
+/** Structured diagnostic log for every Website Audit request -- request URL, final URL, HTTP status, response headers, content-type, crawl duration, crawl result, and exact failure reason (if any). Real, measured values only. */
+function logAuditDiagnostics(requestedUrl: string, crawlResult: { pages: readonly RawCrawledPage[]; robotsTxtContent: string | null; sitemapUrls: readonly string[] }, homePage: RawCrawledPage | null, crawlDurationMs: number, succeeded: boolean): void {
+  console.log(
+    `[website-audit] ${JSON.stringify({
+      requestUrl: requestedUrl,
+      finalUrl: homePage?.finalUrl ?? null,
+      httpStatus: homePage?.status ?? null,
+      responseHeaders: homePage?.headers ?? null,
+      contentType: homePage?.contentType ?? null,
+      crawlDurationMs,
+      pagesDiscovered: crawlResult.pages.length,
+      crawlResult: succeeded ? "success" : "failed",
+      outcome: homePage?.outcome ?? null,
+      failureReason: succeeded ? null : (homePage?.error ?? "no page could be fetched"),
+      robotsTxtFound: crawlResult.robotsTxtContent !== null,
+      sitemapUrlsFound: crawlResult.sitemapUrls.length,
+    })}`,
+  );
+}
+
 /**
  * Runs the full, real Website Audit through SiteAuditOrchestrator: a real
  * multi-page crawl (robots.txt, sitemap.xml, every discovered internal
@@ -143,15 +216,21 @@ export async function runFullAudit(url: string, targetKeyword: string): Promise<
   // (WebsiteCrawlResult.robotsTxtContent / .sitemapUrls) is available for
   // the crawl summary below -- auditSite() would otherwise crawl
   // internally without exposing that raw evidence to this caller.
+  const crawlStartedAt = Date.now();
   const crawlResult = await crawlWebsite(url, { maxPages: MAX_CRAWL_PAGES });
+  const crawlDurationMs = Date.now() - crawlStartedAt;
   const siteResult = await siteAuditOrchestrator.auditCrawl(crawlResult);
+
+  const rawHomePage: RawCrawledPage | null = (crawlResult.pages as RawCrawledPage[]).find((p) => p.url === crawlResult.startUrl) ?? crawlResult.pages[0] ?? null;
 
   const homeEntry =
     siteResult.pageAudits.find((p: { url: string; audit: unknown }) => p.url === siteResult.startUrl && p.audit) ??
     siteResult.pageAudits.find((p: { audit: unknown }) => p.audit);
   if (!homeEntry?.audit) {
-    throw new Error("The start page could not be crawled or audited -- see crawl limitations for the real cause (fetch failure, robots.txt block, or non-HTML response).");
+    logAuditDiagnostics(url, crawlResult, rawHomePage, crawlDurationMs, false);
+    throw new Error(buildCrawlFailureDiagnostic(url, crawlResult, rawHomePage, crawlDurationMs));
   }
+  logAuditDiagnostics(url, crawlResult, rawHomePage, crawlDurationMs, true);
   const homePageAudit: WebsiteAuditResult = homeEntry.audit;
 
   // The primary "websiteAudit" block shown in the UI combines the audited
@@ -189,11 +268,15 @@ export async function runFullAudit(url: string, targetKeyword: string): Promise<
     crossFunctionalNotes: onPageSeo.crossFunctionalNotes,
   });
 
+  const rawPagesByUrl = new Map((crawlResult.pages as RawCrawledPage[]).map((p) => [p.url, p]));
   const crawl: CrawlSummary = {
     runId: siteResult.requestId,
     startUrl: siteResult.startUrl,
     pagesCrawled: siteResult.pagesCrawled,
-    pages: siteResult.pageAudits.map((p: { url: string; status: number | null; error: string | null }) => ({ url: p.url, status: p.status, error: p.error })),
+    pages: siteResult.pageAudits.map((p: { url: string; status: number | null; error: string | null }) => {
+      const raw = rawPagesByUrl.get(p.url);
+      return { url: p.url, status: p.status, error: p.error, outcome: raw?.outcome, contentType: raw?.contentType, durationMs: raw?.durationMs };
+    }),
     // robots.txt and sitemap.xml are always attempted by crawlWebsite() --
     // "found" reflects whether the real request actually returned content,
     // never an assumption.

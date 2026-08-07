@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getServerAuthSession } from "@/server/auth";
 import { db } from "@/server/db";
@@ -6,6 +7,7 @@ import { sendConversationMessage, getSpecialistAgentSpec } from "@/server/backen
 import { generateSpecialistReply } from "@/server/backend/specialist-ai";
 import { runFullAudit, type FullAuditResult } from "@/server/backend/website-audit";
 import { runContentGenerationPipeline, CONTENT_PIPELINE_ENTRY_AGENT_ID, type PipelineStepTrace } from "@/server/backend/specialist-orchestrator";
+import { shouldRouteBackToWebsiteAuditAgent, matchWebsiteAuditFollowUpTerm } from "@/server/backend/follow-up-routing";
 import { logActivity } from "@/server/log-activity";
 import { truncate } from "@/lib/utils";
 
@@ -93,6 +95,16 @@ export async function POST(request: Request) {
       chatSession = await db.chatSession.create({ data: { userId, title: truncate(message, 60) } });
     }
 
+    // Looked up BEFORE creating this turn's user/assistant messages, so this
+    // is genuinely the *previous* completed task's real assigned agent --
+    // never guessed.
+    const previousAssistantMessage = await db.chatMessage.findFirst({
+      where: { sessionId: chatSession.id, role: "assistant", agentId: { not: null } },
+      orderBy: { createdAt: "desc" },
+      select: { agentId: true },
+    });
+    const previousAssignedAgentId = previousAssistantMessage?.agentId ?? null;
+
     const userMessage = await db.chatMessage.create({ data: { sessionId: chatSession.id, role: "user", content: message } });
 
     let result;
@@ -103,8 +115,40 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: reason }, { status: 502 });
     }
 
-    const { response, escalations } = result;
-    const decision = response.routingDecision;
+    let { response, escalations } = result;
+    let decision = response.routingDecision;
+
+    // BUG FIX: a follow-up referencing "the previous audit" (findings,
+    // evidence, validation, review, audit quality, duplicate findings,
+    // contradictions) after Website Audit Agent completed the previous task
+    // was being answered by the Boss Agent instead of routed back to
+    // Website Audit Agent -- TaskRouter scores only the current message's
+    // own vocabulary, with no awareness of which agent handled the prior
+    // turn. Override the routing decision here, using the real previous
+    // agent id and the real matched term -- never fabricated -- rather than
+    // letting the Boss Agent's own (contextless) decision stand.
+    if (decision?.assignedAgentId !== WEBSITE_AUDIT_AGENT_ID && shouldRouteBackToWebsiteAuditAgent(previousAssignedAgentId, message)) {
+      const matchedTerm = matchWebsiteAuditFollowUpTerm(message) ?? "";
+      const overrideDecision = {
+        taskId: decision?.taskId ?? randomUUID(),
+        status: "assigned" as const,
+        assignedAgentId: WEBSITE_AUDIT_AGENT_ID,
+        candidates: [{ agentId: WEBSITE_AUDIT_AGENT_ID, agentTitle: "Website Audit Agent", score: 1, matchedTerms: [matchedTerm] }],
+        rationale: `Follow-up to the previous Website Audit Agent task (matched term: "${matchedTerm}") -- routed back automatically instead of re-scoring through the Boss Agent.`,
+        decidedAt: new Date().toISOString(),
+      };
+      response = {
+        ...response,
+        intent: "task_request",
+        reply: `This has been routed back to "website-audit-agent" -- it's a follow-up to the previous Website Audit Agent task (matched term: "${matchedTerm}").`,
+        routingDecision: overrideDecision,
+      };
+      decision = overrideDecision;
+      // The override fully supersedes whatever the Boss Agent's own
+      // (contextless) attempt produced -- any escalation it raised never
+      // actually reached the user, so it shouldn't be recorded as if it did.
+      escalations = [];
+    }
 
     // The Boss Agent's RoutingDecision above is untouched. Once a task is
     // actually assigned, decide how to produce the specialist's real work

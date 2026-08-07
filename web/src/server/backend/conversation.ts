@@ -98,7 +98,19 @@ async function getClm(): Promise<ClmBundle> {
         { auditLogPath: path.join(backendRoot, "var", "web", "conversation-language-manager", "audit-log.jsonl") },
         backendRoot,
       );
-      const clm = await ConversationLanguageManager.create(clmConfig, orchestrator, approvalChannel);
+      // Pass the real specialist agent titles from the same registry the
+      // Boss Agent just routed against, so the meta-request check (see
+      // boss-agent-meta-request-detector.ts) can tell a validation request
+      // naming a real specialist apart from a genuine question about the
+      // router -- undefined (not omitted) for sessionStore keeps this call
+      // positional while still taking its default.
+      const clm = await ConversationLanguageManager.create(
+        clmConfig,
+        orchestrator,
+        approvalChannel,
+        undefined,
+        registry.list().map((spec: { title: string }) => spec.title),
+      );
 
       return { clm, escalations, getAgentSpec: (agentId: string) => registry.getById(agentId) };
     })();

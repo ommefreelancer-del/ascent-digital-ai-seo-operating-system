@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 4%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 4%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 4%;
+    --primary: 240 6% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 5% 96%;
+    --secondary-foreground: 240 6% 10%;
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 4% 46%;
+    --accent: 240 5% 96%;
+    --accent-foreground: 240 6% 10%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 142 71% 35%;
+    --success-foreground: 0 0% 98%;
+    --warning: 38 92% 42%;
+    --warning-foreground: 0 0% 98%;
+    --border: 240 6% 90%;
+    --input: 240 6% 90%;
+    --ring: 240 6% 10%;
+    --radius: 0.65rem;
+    --sidebar: 0 0% 99%;
+    --sidebar-foreground: 240 6% 25%;
+    --sidebar-border: 240 6% 92%;
+    --sidebar-accent: 240 5% 95%;
+  }
+
+  .dark {
+    --background: 240 10% 4%;
+    --foreground: 0 0% 95%;
+    --card: 240 8% 7%;
+    --card-foreground: 0 0% 95%;
+    --popover: 240 8% 7%;
+    --popover-foreground: 0 0% 95%;
+    --primary: 0 0% 95%;
+    --primary-foreground: 240 6% 10%;
+    --secondary: 240 6% 13%;
+    --secondary-foreground: 0 0% 95%;
+    --muted: 240 6% 13%;
+    --muted-foreground: 240 5% 65%;
+    --accent: 240 6% 15%;
+    --accent-foreground: 0 0% 95%;
+    --destructive: 0 63% 42%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 142 60% 42%;
+    --success-foreground: 0 0% 98%;
+    --warning: 38 85% 50%;
+    --warning-foreground: 0 0% 10%;
+    --border: 240 6% 16%;
+    --input: 240 6% 16%;
+    --ring: 240 5% 65%;
+    --sidebar: 240 9% 6%;
+    --sidebar-foreground: 240 5% 75%;
+    --sidebar-border: 240 6% 14%;
+    --sidebar-accent: 240 6% 12%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-border rounded-full;
+  }
+  .skeleton {
+    @apply relative overflow-hidden bg-muted;
+  }
+  .skeleton::after {
+    content: "";
+    @apply absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/10 to-transparent animate-shimmer;
+  }
+}

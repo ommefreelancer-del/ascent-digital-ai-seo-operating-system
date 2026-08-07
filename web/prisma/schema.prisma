@@ -1,0 +1,186 @@
+// ADASOS web (v2.0) data model.
+//
+// This is new, additive persistence for the frontend layer only (accounts,
+// projects, saved API results) -- it never touches the frozen backend's own
+// audit-log / task-state files under ../var, and the backend package itself
+// is never modified.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  passwordHash  String
+  companyName   String?
+  jobTitle      String?
+  role          String    @default("owner")
+  theme         String    @default("system")
+  emailNotifications Boolean @default(true)
+  productUpdates     Boolean @default(true)
+  weeklyDigest       Boolean @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  projects       Project[]
+  apiKeys        ApiKey[]
+  resetTokens    PasswordResetToken[]
+  savedKeywords  SavedKeyword[]
+  chatSessions   ChatSession[]
+  reports        Report[]
+  seoAudits      SeoAudit[]
+  contentDrafts  ContentDraft[]
+  activities     ActivityEvent[]
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+}
+
+model Project {
+  id        String   @id @default(cuid())
+  name      String
+  domain    String?
+  niche     String?
+  status    String   @default("active") // active | paused | completed
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  activities ProjectActivity[]
+  audits     SeoAudit[]
+  reports    Report[]
+
+  @@index([ownerId, status])
+}
+
+model ProjectActivity {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type      String
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([projectId, createdAt])
+}
+
+model SeoAudit {
+  id            String   @id @default(cuid())
+  projectId     String?
+  project       Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  url           String
+  resultJson    String
+  criticalCount Int
+  warningCount  Int
+  infoCount     Int
+  createdAt     DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([projectId])
+}
+
+model SavedKeyword {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  keyword       String
+  intent        String
+  intentRationale String
+  createdAt     DateTime @default(now())
+
+  @@unique([userId, keyword])
+  @@index([userId, createdAt])
+}
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label      String
+  keyPrefix  String
+  keyHash    String
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+}
+
+model ChatSession {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages ChatMessage[]
+
+  @@index([userId, createdAt])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role      String   // user | assistant
+  content   String
+  agentId   String?
+  status    String?  // assigned | escalated | rejected
+  metaJson  String?  // JSON: { routingDecision, escalations } for assistant messages, for the Task Progress / Execution Log detail view
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([createdAt])
+}
+
+model Report {
+  id         String   @id @default(cuid())
+  projectId  String?
+  project    Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title      String
+  type       String   // seo-performance | ai-usage | keyword-growth
+  resultJson String
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model ContentDraft {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       String   // blog | landing-page | meta | social
+  title      String
+  resultJson String
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model ActivityEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category  String
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
