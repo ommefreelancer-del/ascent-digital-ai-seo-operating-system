@@ -9,8 +9,17 @@ build/
 .env.*.local
 prisma/dev.db
 prisma/dev.db-journal
+# Prisma resolves a relative sqlite DATABASE_URL against schema.prisma's own
+# directory, not the project root -- with DATABASE_URL="file:./prisma/dev.db"
+# and the schema at prisma/schema.prisma, the real file lands at
+# prisma/prisma/dev.db. Confirmed on disk: the plain "prisma/dev.db" pattern
+# above was silently missing it, leaving a real local dev database untracked
+# and un-ignored at the same time.
+prisma/prisma/dev.db
+prisma/prisma/dev.db-journal
 .DS_Store
 next-env.d.ts
+tsconfig.tsbuildinfo
 
 # PM2 runtime state (dump.pm2, logs, pid files) -- machine-local operational
 # data, not source. The *config* that produces it (ecosystem.config.cjs,

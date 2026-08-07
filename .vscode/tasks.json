@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ADASOS: Start Dev Server",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}/web"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true,
+        "group": "adasos"
+      },
+      "problemMatcher": {
+        "owner": "adasos",
+        "pattern": {
+          "regexp": "^ZZZZ_NEVER_MATCH_ZZZZ$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Starting\\.\\.\\.",
+          "endsPattern": "(Ready in|Ready on|error)"
+        }
+      },
+      "runOptions": {
+        "runOn": "default"
+      }
+    }
+  ]
+}
