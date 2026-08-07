@@ -7,7 +7,7 @@
 # never written down. Re-run this any time -- after a Windows reinstall, if
 # the task gets deleted, or to verify current settings are still correct.
 #
-# Two root causes this fixes (see RUN_GUIDE.md for the full investigation):
+# Two root causes this fixes (see ../RUN_GUIDE.md for the full investigation):
 #
 # 1. The task's DisallowStartIfOnBatteries / StopIfGoingOnBatteries were
 #    left at Windows Task Scheduler's defaults (both true). On a laptop
@@ -37,7 +37,7 @@ if (-not (Test-Path $RunCmdLong)) {
 }
 
 # Task Scheduler's XML Command element has historically been the more
-# reliable path here (see run-watchdog.cmd / RUN_GUIDE.md's PM2_HOME note
+# reliable path here (see run-watchdog.cmd / ../RUN_GUIDE.md's PM2_HOME note
 # on Windows path-quoting bugs with spaces) -- resolve to the 8.3 short
 # path to match what was already proven working.
 $fso = New-Object -ComObject Scripting.FileSystemObject

@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const webRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
-// Registered as a persistent user env var (see RUN_GUIDE.md); falls back to
+// Registered as a persistent user env var (see ../RUN_GUIDE.md); falls back to
 // the space-free 8.3 short path in case this script runs before the
 // registry value has propagated to the current session.
 const PM2_HOME = process.env.PM2_HOME || "C:\\Users\\OMMEKA~1\\.pm2";
@@ -137,7 +137,7 @@ function checkWatchdogTask() {
     record(
       "Watchdog scheduled task installed",
       false,
-      "task exists but will NOT run on battery power (this is the exact bug from RUN_GUIDE.md) -- re-run: powershell -File scripts/install-watchdog-task.ps1"
+      "task exists but will NOT run on battery power (this is the exact bug from ../RUN_GUIDE.md) -- re-run: powershell -File scripts/install-watchdog-task.ps1"
     );
     return;
   }

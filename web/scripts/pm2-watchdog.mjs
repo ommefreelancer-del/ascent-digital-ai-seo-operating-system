@@ -1,6 +1,6 @@
 // Self-healing check for the adasos-web PM2 process, meant to run
 // periodically (see the "ADASOS-PM2-Watchdog" Scheduled Task set up
-// alongside this script -- RUN_GUIDE.md documents it).
+// alongside this script -- ../RUN_GUIDE.md documents it).
 //
 // Why this exists: pm2-windows-startup registers a `HKCU\...\Run` entry,
 // which Windows only fires on interactive logon -- i.e. a real reboot or a
@@ -99,5 +99,5 @@ if (afterStart.online) {
   process.exit(0);
 }
 
-log(`FAILED to recover ${APP_NAME} (${afterStart.reason}). Manual intervention needed -- see RUN_GUIDE.md.`);
+log(`FAILED to recover ${APP_NAME} (${afterStart.reason}). Manual intervention needed -- see ../RUN_GUIDE.md.`);
 process.exit(1);
