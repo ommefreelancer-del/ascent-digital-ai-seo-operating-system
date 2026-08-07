@@ -1,0 +1,18 @@
+node_modules/
+.next/
+out/
+dist/
+build/
+*.log
+.env
+.env.local
+.env.*.local
+prisma/dev.db
+prisma/dev.db-journal
+.DS_Store
+next-env.d.ts
+
+# PM2 runtime state (dump.pm2, logs, pid files) -- machine-local operational
+# data, not source. The *config* that produces it (ecosystem.config.cjs,
+# scripts/pm2-*.mjs) is tracked; this directory is regenerated on first run.
+.pm2/
