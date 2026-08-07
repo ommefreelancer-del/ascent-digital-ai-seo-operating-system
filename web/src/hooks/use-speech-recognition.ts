@@ -30,7 +30,22 @@ function getSpeechRecognitionCtor(): typeof SpeechRecognition | null {
 export function useSpeechRecognition({ onResult, onError }: UseSpeechRecognitionOptions): UseSpeechRecognitionResult {
   const [listening, setListening] = React.useState(false);
   const recognitionRef = React.useRef<SpeechRecognition | null>(null);
-  const supported = React.useMemo(() => getSpeechRecognitionCtor() !== null, []);
+  // Starts false -- matching the server, where `window` doesn't exist -- and
+  // is only set to the real feature-detected value after mount. The
+  // previous version computed this with useMemo(() => ..., []), which still
+  // runs synchronously during render, including the client's *first* render
+  // (the one hydration diffs against the server's HTML). In any browser that
+  // actually supports speech recognition (Chrome, Edge), that first client
+  // render produced `true` against the server's unconditional `false`,
+  // mismatching the "Voice input language" button and the mic button's
+  // disabled/title attributes in workspace-shell.tsx. Deferring the real
+  // check to an effect makes the first client render match the server
+  // exactly; the flip to the real value then happens as an ordinary
+  // post-hydration re-render, not a hydration diff.
+  const [supported, setSupported] = React.useState(false);
+  React.useEffect(() => {
+    setSupported(getSpeechRecognitionCtor() !== null);
+  }, []);
 
   const stop = React.useCallback(() => {
     recognitionRef.current?.stop();

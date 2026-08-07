@@ -19,7 +19,18 @@ interface UseSpeechSynthesisResult {
 export function useSpeechSynthesis(): UseSpeechSynthesisResult {
   const [speaking, setSpeaking] = React.useState(false);
   const voicesRef = React.useRef<SpeechSynthesisVoice[]>([]);
-  const supported = typeof window !== "undefined" && "speechSynthesis" in window;
+  // Same fix as use-speech-recognition.ts's `supported` state: starts false
+  // to match SSR (no `window` on the server), then flips to the real value
+  // in an effect after mount. The previous version computed this inline
+  // during render, which matches the server on the server pass but not on
+  // the client's first render in any browser that actually has
+  // speechSynthesis (every modern one) -- a hydration mismatch on the
+  // volume/mute button's variant, disabled state, and title text in
+  // workspace-shell.tsx.
+  const [supported, setSupported] = React.useState(false);
+  React.useEffect(() => {
+    setSupported(typeof window !== "undefined" && "speechSynthesis" in window);
+  }, []);
 
   React.useEffect(() => {
     if (!supported) return;
