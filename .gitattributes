@@ -1,0 +1,5 @@
+# Git hooks and shell scripts must keep LF endings regardless of the
+# checkout platform's autocrlf setting -- a CRLF shebang line can break
+# script execution (a bash script needs to just run, not "mostly work").
+.githooks/* text eol=lf
+*.sh text eol=lf

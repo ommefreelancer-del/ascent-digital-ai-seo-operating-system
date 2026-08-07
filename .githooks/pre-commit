@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Blocks a commit if the working tree has untracked files that aren't
+# gitignored. This exists because most of web/ (the whole Next.js app: src/,
+# tests/, prisma/schema.prisma, configs) was silently never committed for
+# weeks -- new files kept getting created without a matching `git add`, and
+# nothing ever flagged it. See RUN_GUIDE.md for the full investigation.
+#
+# This does not run automatically on a fresh clone -- git doesn't track
+# hook wiring itself. Each clone needs to opt in once:
+#   git config core.hooksPath .githooks
+set -euo pipefail
+
+untracked=$(git status --porcelain --untracked-files=all | grep '^??' | awk '{print $2}' || true)
+
+if [ -n "$untracked" ]; then
+  echo "pre-commit: refusing to commit -- untracked files exist that this commit won't include:" >&2
+  echo "$untracked" | sed 's/^/  /' >&2
+  echo >&2
+  echo "Either 'git add' them (they're production files that belong in this commit)" >&2
+  echo "or add a pattern for them to the nearest .gitignore (they're generated/local)." >&2
+  echo "This check exists so new files never again silently go untracked -- see RUN_GUIDE.md." >&2
+  exit 1
+fi

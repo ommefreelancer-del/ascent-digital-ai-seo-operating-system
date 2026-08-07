@@ -182,6 +182,16 @@ fixed: Prisma resolves a relative sqlite `DATABASE_URL` against
 path the old `prisma/dev.db` ignore pattern never matched, leaving the real
 local database both untracked *and* un-ignored at the same time.
 
+**To stop this from happening a third time**, a `pre-commit` hook
+(`.githooks/pre-commit`) now refuses any commit while untracked files
+exist that aren't gitignored — the exact situation that let this drift for
+weeks unnoticed. It isn't wired up automatically on a fresh clone (git
+doesn't version hook activation, only hook *files*); run this once per
+clone:
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Health check
 
 ```bash
