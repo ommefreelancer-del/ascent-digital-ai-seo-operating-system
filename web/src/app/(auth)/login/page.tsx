@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/toast";
 import { loginSchema, type LoginInput } from "@/lib/validators";
+import { trackLogin } from "@/lib/analytics/events";
 
 export default function LoginPage() {
   return (
@@ -43,6 +44,7 @@ function LoginForm() {
         toast({ title: "Sign in failed", description, variant: "destructive" });
         return;
       }
+      trackLogin("credentials");
       router.push(searchParams.get("callbackUrl") ?? "/dashboard");
       router.refresh();
     } catch {

@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatRelativeTime, truncate } from "@/lib/utils";
+import { trackReportGenerated } from "@/lib/analytics/events";
 
 // Charts (recharts + its d3-* deps) are only needed once a chart-bearing
 // report is opened -- dynamic-import them client-only so they don't bloat
@@ -57,6 +58,7 @@ export function ReportsShell({ projects, initialReports }: { projects: Array<{ i
     const createdAt = new Date().toISOString();
     setReports((prev) => [{ id: reportId, title, type, createdAt }, ...prev]);
     setActive({ id: reportId, title, type, createdAt, result });
+    trackReportGenerated(type);
   }
 
   async function generateSeoPerformance(e: React.FormEvent) {

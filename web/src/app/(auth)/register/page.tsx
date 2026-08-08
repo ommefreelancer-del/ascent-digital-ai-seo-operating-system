@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/toast";
 import { registerSchema, type RegisterInput } from "@/lib/validators";
+import { trackSignUp } from "@/lib/analytics/events";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -37,6 +38,7 @@ export default function RegisterPage() {
         toast({ title: "Could not create account", description: data.error ?? "Please try again.", variant: "destructive" });
         return;
       }
+      trackSignUp("credentials");
       const result = await signIn("credentials", { email: values.email, password: values.password, redirect: false });
       if (result?.error) {
         toast({ title: "Account created", description: "Please sign in." });

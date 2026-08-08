@@ -6,6 +6,7 @@ import { LogOut, Settings, User } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { initials } from "@/lib/utils";
+import { trackLogout } from "@/lib/analytics/events";
 
 export function UserMenu() {
   const { data: session } = useSession();
@@ -38,7 +39,12 @@ export function UserMenu() {
           </Link>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => signOut({ callbackUrl: "/login" })}>
+        <DropdownMenuItem
+          onSelect={() => {
+            trackLogout();
+            signOut({ callbackUrl: "/login" });
+          }}
+        >
           <LogOut className="h-4 w-4" /> Sign out
         </DropdownMenuItem>
       </DropdownMenuContent>

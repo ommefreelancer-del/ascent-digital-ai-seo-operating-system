@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatRelativeTime, truncate } from "@/lib/utils";
+import { trackSeoAuditCompleted } from "@/lib/analytics/events";
 
 interface AuditFinding {
   category: string;
@@ -131,6 +132,11 @@ export function SeoAuditShell({ projects, initialAudits }: { projects: Array<{ i
       if (!res.ok) throw new Error(data.error ?? "The audit could not be completed.");
       setResult(data.result);
       setActiveUrl(url);
+      trackSeoAuditCompleted({
+        criticalCount: data.result.websiteAudit.summary.criticalCount,
+        warningCount: data.result.websiteAudit.summary.warningCount,
+        infoCount: data.result.websiteAudit.summary.infoCount,
+      });
       setAudits((prev) => [
         {
           id: data.auditId,

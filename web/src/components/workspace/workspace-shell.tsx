@@ -12,6 +12,7 @@ import { cn, formatRelativeTime, truncate } from "@/lib/utils";
 import { useSpeechRecognition } from "@/hooks/use-speech-recognition";
 import { useSpeechSynthesis } from "@/hooks/use-speech-synthesis";
 import type { SpeechLanguage } from "@/lib/speech";
+import { trackAiWorkspaceMessageSent } from "@/lib/analytics/events";
 
 const TTS_STORAGE_KEY = "adasos.workspace.ttsEnabled";
 
@@ -199,6 +200,10 @@ export function WorkspaceShell() {
       setMessages((prev) => [...prev.filter((m) => m.id !== optimisticUser.id), data.userMessage, data.assistantMessage]);
       setActiveSessionId(data.sessionId);
       loadSessions();
+      trackAiWorkspaceMessageSent({
+        agentId: data.assistantMessage?.agentId ?? null,
+        status: data.assistantMessage?.status ?? null,
+      });
       if (ttsEnabled && data.assistantMessage?.content) {
         speak(data.assistantMessage.content);
       }
