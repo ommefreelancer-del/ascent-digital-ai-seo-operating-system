@@ -2,13 +2,14 @@ import { Topbar } from "@/components/layout/topbar";
 import { SettingsShell } from "@/components/settings/settings-shell";
 import { getServerAuthSession } from "@/server/auth";
 import { db } from "@/server/db";
+import { getConnectionStatus } from "@/server/google-search-console";
 import { redirect } from "next/navigation";
 
 export default async function SettingsPage() {
   const session = await getServerAuthSession();
   if (!session) redirect("/login");
 
-  const [user, apiKeys] = await Promise.all([
+  const [user, apiKeys, googleSearchConsole] = await Promise.all([
     db.user.findUnique({
       where: { id: session.user.id },
       select: {
@@ -27,6 +28,7 @@ export default async function SettingsPage() {
       orderBy: { createdAt: "desc" },
       select: { id: true, label: true, keyPrefix: true, createdAt: true, lastUsedAt: true },
     }),
+    getConnectionStatus(session.user.id),
   ]);
 
   if (!user) redirect("/login");
@@ -42,6 +44,7 @@ export default async function SettingsPage() {
             createdAt: k.createdAt.toISOString(),
             lastUsedAt: k.lastUsedAt ? k.lastUsedAt.toISOString() : null,
           }))}
+          initialGoogleSearchConsole={googleSearchConsole}
         />
       </div>
     </>

@@ -38,6 +38,7 @@ model User {
   seoAudits      SeoAudit[]
   contentDrafts  ContentDraft[]
   activities     ActivityEvent[]
+  googleSearchConsoleConnection GoogleSearchConsoleConnection?
 }
 
 model PasswordResetToken {
@@ -183,4 +184,31 @@ model ActivityEvent {
   createdAt DateTime @default(now())
 
   @@index([userId, createdAt])
+}
+
+// A per-user connection to the user's own Google Search Console data,
+// distinct from app login (which stays email/password via CredentialsProvider
+// in server/auth.ts). Populated by the OAuth flow under
+// api/integrations/google-search-console/*, never by next-auth itself --
+// there's no NextAuth Adapter/Account table in this schema, so a next-auth
+// GoogleProvider would have nowhere valid to attach a session's identity.
+model GoogleSearchConsoleConnection {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken     String
+  refreshToken    String
+  scope           String
+  expiresAt       DateTime
+  // Which of the account's sites.list properties to query for this user.
+  // Was never persisted anywhere before -- listSites() can return several
+  // properties (most Wix-auto-registered and unverified), and nothing chose
+  // one for Search Analytics calls to actually target. Auto-picked (first
+  // verified property) the first time it's needed and cached here; null
+  // means "not yet resolved" or "no verified property exists yet", not
+  // "unset by mistake" -- see server/google-search-console.ts's
+  // getOrSelectPrimarySite().
+  selectedSiteUrl String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 }

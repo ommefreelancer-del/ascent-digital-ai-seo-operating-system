@@ -2,7 +2,8 @@
 
 import * as React from "react";
 import { useTheme } from "next-themes";
-import { AlertTriangle, Check, Copy, KeyRound, Laptop, Moon, Plus, Sun, Trash2 } from "lucide-react";
+import { useSearchParams } from "next/navigation";
+import { AlertTriangle, Check, Copy, KeyRound, Laptop, Link2, Moon, Plus, Sun, Trash2, Unlink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -34,9 +35,20 @@ interface ApiKeyItem {
   lastUsedAt: string | null;
 }
 
-export function SettingsShell({ user, initialApiKeys }: { user: UserSettings; initialApiKeys: ApiKeyItem[] }) {
+export function SettingsShell({
+  user,
+  initialApiKeys,
+  initialGoogleSearchConsole,
+}: {
+  user: UserSettings;
+  initialApiKeys: ApiKeyItem[];
+  initialGoogleSearchConsole: { connected: boolean; connectedAt?: string };
+}) {
+  const searchParams = useSearchParams();
+  const [activeTab, setActiveTab] = React.useState(searchParams.get("tab") === "integrations" ? "integrations" : "profile");
+
   return (
-    <Tabs defaultValue="profile" className="space-y-4">
+    <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
       <TabsList className="flex h-auto flex-wrap gap-1 bg-transparent p-0">
         {["profile", "company", "api-keys", "theme", "notifications", "billing", "integrations"].map((tab) => (
           <TabsTrigger key={tab} value={tab} className="capitalize data-[state=active]:bg-secondary">
@@ -64,7 +76,7 @@ export function SettingsShell({ user, initialApiKeys }: { user: UserSettings; in
         <PlaceholderCard title="Billing" message="Billing and subscription management is coming soon. No payment provider is connected yet." />
       </TabsContent>
       <TabsContent value="integrations">
-        <PlaceholderCard title="Integrations" message="Third-party integrations (Google Search Console, Analytics, CMS platforms) are coming soon." />
+        <IntegrationsCard initial={initialGoogleSearchConsole} />
       </TabsContent>
     </Tabs>
   );
@@ -410,6 +422,83 @@ function ApiKeysCard({ initialKeys }: { initialKeys: ApiKeyItem[] }) {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function IntegrationsCard({ initial }: { initial: { connected: boolean; connectedAt?: string } }) {
+  const { toast } = useToast();
+  const searchParams = useSearchParams();
+  const [status, setStatus] = React.useState(initial);
+  const [pending, setPending] = React.useState(false);
+  const notified = React.useRef(false);
+
+  React.useEffect(() => {
+    if (notified.current) return;
+    const gsc = searchParams.get("gsc");
+    if (!gsc) return;
+    notified.current = true;
+    const messages: Record<string, { title: string; variant?: "destructive" }> = {
+      connected: { title: "Google Search Console connected" },
+      denied: { title: "Connection cancelled", variant: "destructive" },
+      invalid_state: { title: "Connection failed -- please try again", variant: "destructive" },
+      error: { title: "Connection failed -- please try again", variant: "destructive" },
+    };
+    const message = messages[gsc];
+    if (message) toast({ title: message.title, variant: message.variant });
+    if (gsc === "connected") setStatus({ connected: true, connectedAt: new Date().toISOString() });
+  }, [searchParams, toast]);
+
+  async function disconnect() {
+    if (!confirm("Disconnect Google Search Console? You'll need to reconnect to access Search Console data again.")) return;
+    setPending(true);
+    try {
+      const res = await fetch("/api/integrations/google-search-console", { method: "DELETE" });
+      if (!res.ok) throw new Error("Disconnect failed");
+      setStatus({ connected: false });
+      toast({ title: "Google Search Console disconnected" });
+    } catch {
+      toast({ title: "Couldn't disconnect", description: "Please try again.", variant: "destructive" });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <Card className="max-w-lg">
+      <CardHeader>
+        <CardTitle>Integrations</CardTitle>
+        <CardDescription>Connect third-party accounts ADASOS can pull data from.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-3">
+          <div>
+            <p className="text-sm font-medium">Google Search Console</p>
+            <p className="text-xs text-muted-foreground">
+              {status.connected
+                ? `Connected${status.connectedAt ? ` · ${formatRelativeTime(status.connectedAt)}` : ""}`
+                : "Not connected -- read-only access to your Search Console properties."}
+            </p>
+          </div>
+          {status.connected ? (
+            <Button size="sm" variant="outline" onClick={disconnect} disabled={pending} loading={pending}>
+              <Unlink className="h-3.5 w-3.5" /> Disconnect
+            </Button>
+          ) : (
+            <Button size="sm" asChild>
+              <a href="/api/integrations/google-search-console/connect">
+                <Link2 className="h-3.5 w-3.5" /> Connect
+              </a>
+            </Button>
+          )}
+        </div>
+        <div className="border-t border-border pt-4">
+          <Badge variant="secondary" className="mb-2">
+            Coming soon
+          </Badge>
+          <p className="text-sm text-muted-foreground">Analytics and CMS platform integrations are coming soon.</p>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

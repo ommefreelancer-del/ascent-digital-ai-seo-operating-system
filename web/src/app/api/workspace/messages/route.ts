@@ -5,6 +5,7 @@ import { db } from "@/server/db";
 import { chatMessageSchema } from "@/lib/validators";
 import { sendConversationMessage, getSpecialistAgentSpec } from "@/server/backend/conversation";
 import { generateSpecialistReply } from "@/server/backend/specialist-ai";
+import { buildSearchConsoleContext } from "@/server/backend/performance-analytics";
 import { runFullAudit, type FullAuditResult } from "@/server/backend/website-audit";
 import { runContentGenerationPipeline, CONTENT_PIPELINE_ENTRY_AGENT_ID, type PipelineStepTrace } from "@/server/backend/specialist-orchestrator";
 import { shouldRouteBackToWebsiteAuditAgent, matchWebsiteAuditFollowUpTerm } from "@/server/backend/follow-up-routing";
@@ -15,6 +16,7 @@ import { truncate } from "@/lib/utils";
 // parsed by AgentRegistry -- see src/agents/website-audit-agent/dispatch.ts's
 // WEBSITE_AUDIT_AGENT_ID for the canonical backend constant this mirrors).
 const WEBSITE_AUDIT_AGENT_ID = "website-audit-agent";
+const PERFORMANCE_ANALYTICS_AGENT_ID = "performance-analytics-agent";
 const URL_PATTERN = /https?:\/\/[^\s)>\]"']+/i;
 // Fallback for a URL typed without a protocol ("audit example.com"). Deliberately
 // conservative: requires a real-looking multi-label domain with a letters-only
@@ -198,7 +200,20 @@ export async function POST(request: Request) {
       try {
         const spec = await getSpecialistAgentSpec(decision.assignedAgentId);
         if (spec) {
-          assistantContent = await generateSpecialistReply(spec, message, decision.rationale);
+          // The Performance & Analytics Agent's own Rules say "base all
+          // conclusions on verified performance data" and "never fabricate
+          // or manipulate metrics" -- but nothing ever gave it real data to
+          // base anything on. buildSearchConsoleContext() makes a real call
+          // to the already-connected Google Search Console integration
+          // (server/google-search-console.ts) and appends the true result
+          // (real numbers, or a real "not connected"/"not verified"/"no
+          // data yet" status) to the message, so the model is grounded
+          // either way instead of guessing it has no access at all.
+          const effectiveMessage =
+            decision.assignedAgentId === PERFORMANCE_ANALYTICS_AGENT_ID
+              ? `${message}\n\n${await buildSearchConsoleContext(userId)}`
+              : message;
+          assistantContent = await generateSpecialistReply(spec, effectiveMessage, decision.rationale);
         }
       } catch (error) {
         const reason = error instanceof Error ? error.message : "an unknown error";
