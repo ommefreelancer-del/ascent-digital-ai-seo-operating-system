@@ -16,6 +16,8 @@ function makeAgentSpec(overrides: Partial<AgentSpec> = {}): AgentSpec {
     tools: [],
     rules: [],
     successCriteria: [],
+    tags: [],
+    capabilities: [],
     ...overrides,
   };
 }
