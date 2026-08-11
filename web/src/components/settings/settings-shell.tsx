@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
 import { cn, formatRelativeTime } from "@/lib/utils";
-import { apiKeySchema, profileSchema, urlInspectionSchema } from "@/lib/validators";
+import { apiKeySchema, profileSchema, urlInspectionSchema, googleSheetsValuesSchema } from "@/lib/validators";
 
 interface UserSettings {
   name: string;
@@ -39,10 +39,12 @@ export function SettingsShell({
   user,
   initialApiKeys,
   initialGoogleSearchConsole,
+  initialGoogleSheets,
 }: {
   user: UserSettings;
   initialApiKeys: ApiKeyItem[];
   initialGoogleSearchConsole: { connected: boolean; connectedAt?: string };
+  initialGoogleSheets: { connected: boolean; connectedAt?: string };
 }) {
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = React.useState(searchParams.get("tab") === "integrations" ? "integrations" : "profile");
@@ -76,7 +78,7 @@ export function SettingsShell({
         <PlaceholderCard title="Billing" message="Billing and subscription management is coming soon. No payment provider is connected yet." />
       </TabsContent>
       <TabsContent value="integrations">
-        <IntegrationsCard initial={initialGoogleSearchConsole} />
+        <IntegrationsCard initial={initialGoogleSearchConsole} initialGoogleSheets={initialGoogleSheets} />
       </TabsContent>
     </Tabs>
   );
@@ -425,12 +427,21 @@ function ApiKeysCard({ initialKeys }: { initialKeys: ApiKeyItem[] }) {
   );
 }
 
-function IntegrationsCard({ initial }: { initial: { connected: boolean; connectedAt?: string } }) {
+function IntegrationsCard({
+  initial,
+  initialGoogleSheets,
+}: {
+  initial: { connected: boolean; connectedAt?: string };
+  initialGoogleSheets: { connected: boolean; connectedAt?: string };
+}) {
   const { toast } = useToast();
   const searchParams = useSearchParams();
   const [status, setStatus] = React.useState(initial);
   const [pending, setPending] = React.useState(false);
+  const [sheetsStatus, setSheetsStatus] = React.useState(initialGoogleSheets);
+  const [sheetsPending, setSheetsPending] = React.useState(false);
   const notified = React.useRef(false);
+  const sheetsNotified = React.useRef(false);
 
   React.useEffect(() => {
     if (notified.current) return;
@@ -448,6 +459,22 @@ function IntegrationsCard({ initial }: { initial: { connected: boolean; connecte
     if (gsc === "connected") setStatus({ connected: true, connectedAt: new Date().toISOString() });
   }, [searchParams, toast]);
 
+  React.useEffect(() => {
+    if (sheetsNotified.current) return;
+    const googleSheets = searchParams.get("google_sheets");
+    if (!googleSheets) return;
+    sheetsNotified.current = true;
+    const messages: Record<string, { title: string; variant?: "destructive" }> = {
+      connected: { title: "Google Sheets connected" },
+      denied: { title: "Connection cancelled", variant: "destructive" },
+      invalid_state: { title: "Connection failed -- please try again", variant: "destructive" },
+      error: { title: "Connection failed -- please try again", variant: "destructive" },
+    };
+    const message = messages[googleSheets];
+    if (message) toast({ title: message.title, variant: message.variant });
+    if (googleSheets === "connected") setSheetsStatus({ connected: true, connectedAt: new Date().toISOString() });
+  }, [searchParams, toast]);
+
   async function disconnect() {
     if (!confirm("Disconnect Google Search Console? You'll need to reconnect to access Search Console data again.")) return;
     setPending(true);
@@ -460,6 +487,21 @@ function IntegrationsCard({ initial }: { initial: { connected: boolean; connecte
       toast({ title: "Couldn't disconnect", description: "Please try again.", variant: "destructive" });
     } finally {
       setPending(false);
+    }
+  }
+
+  async function disconnectSheets() {
+    if (!confirm("Disconnect Google Sheets? You'll need to reconnect to access your spreadsheets again.")) return;
+    setSheetsPending(true);
+    try {
+      const res = await fetch("/api/integrations/google-sheets", { method: "DELETE" });
+      if (!res.ok) throw new Error("Disconnect failed");
+      setSheetsStatus({ connected: false });
+      toast({ title: "Google Sheets disconnected" });
+    } catch {
+      toast({ title: "Couldn't disconnect", description: "Please try again.", variant: "destructive" });
+    } finally {
+      setSheetsPending(false);
     }
   }
 
@@ -492,14 +534,165 @@ function IntegrationsCard({ initial }: { initial: { connected: boolean; connecte
           )}
         </div>
         {status.connected ? <UrlInspectionTool /> : null}
+
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-3">
+          <div>
+            <p className="text-sm font-medium">Google Sheets</p>
+            <p className="text-xs text-muted-foreground">
+              {sheetsStatus.connected
+                ? `Connected${sheetsStatus.connectedAt ? ` · ${formatRelativeTime(sheetsStatus.connectedAt)}` : ""}`
+                : "Not connected -- read-only access to your spreadsheets."}
+            </p>
+          </div>
+          {sheetsStatus.connected ? (
+            <Button size="sm" variant="outline" onClick={disconnectSheets} disabled={sheetsPending} loading={sheetsPending}>
+              <Unlink className="h-3.5 w-3.5" /> Disconnect
+            </Button>
+          ) : (
+            <Button size="sm" asChild>
+              <a href="/api/integrations/google-sheets/connect">
+                <Link2 className="h-3.5 w-3.5" /> Connect
+              </a>
+            </Button>
+          )}
+        </div>
+        {sheetsStatus.connected ? <GoogleSheetsTool /> : null}
+
         <div className="border-t border-border pt-4">
           <Badge variant="secondary" className="mb-2">
             Coming soon
           </Badge>
-          <p className="text-sm text-muted-foreground">Analytics and CMS platform integrations are coming soon.</p>
+          <p className="text-sm text-muted-foreground">CMS platform integrations are coming soon.</p>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+interface SpreadsheetFile {
+  id: string;
+  name: string;
+  modifiedTime?: string;
+}
+
+function GoogleSheetsTool() {
+  const [spreadsheets, setSpreadsheets] = React.useState<SpreadsheetFile[] | null>(null);
+  const [loadingList, setLoadingList] = React.useState(false);
+  const [listError, setListError] = React.useState<string | null>(null);
+  const [spreadsheetId, setSpreadsheetId] = React.useState("");
+  const [range, setRange] = React.useState("A1:Z20");
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [values, setValues] = React.useState<string[][] | null>(null);
+
+  async function loadSpreadsheets() {
+    setLoadingList(true);
+    setListError(null);
+    try {
+      const res = await fetch("/api/integrations/google-sheets/spreadsheets");
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Could not list spreadsheets.");
+      setSpreadsheets(body.spreadsheets);
+      if (body.spreadsheets[0]) setSpreadsheetId(body.spreadsheets[0].id);
+    } catch (err) {
+      setListError(err instanceof Error ? err.message : "Could not list spreadsheets.");
+    } finally {
+      setLoadingList(false);
+    }
+  }
+
+  React.useEffect(() => {
+    loadSpreadsheets();
+  }, []);
+
+  async function readValues(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const parsed = googleSheetsValuesSchema.safeParse({ spreadsheetId, range });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? "Enter a spreadsheet and range.");
+      return;
+    }
+    setLoading(true);
+    setValues(null);
+    try {
+      const res = await fetch("/api/integrations/google-sheets/values", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed.data),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Could not read this range.");
+      setValues(body.values.values);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not read this range.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 border-t border-border pt-4">
+      <div>
+        <p className="text-sm font-medium">Read a spreadsheet</p>
+        <p className="text-xs text-muted-foreground">Pull real cell values from one of your Google Sheets.</p>
+      </div>
+      {listError ? (
+        <p className="flex items-center gap-1.5 text-xs text-destructive">
+          <AlertTriangle className="h-3.5 w-3.5" /> {listError}
+        </p>
+      ) : null}
+      <form onSubmit={readValues} className="space-y-2">
+        <select
+          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
+          value={spreadsheetId}
+          onChange={(e) => setSpreadsheetId(e.target.value)}
+          disabled={loadingList || !spreadsheets?.length}
+          aria-label="Spreadsheet"
+        >
+          {!spreadsheets?.length ? <option value="">{loadingList ? "Loading spreadsheets…" : "No spreadsheets found"}</option> : null}
+          {spreadsheets?.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+        <div className="flex items-center gap-2">
+          <Input value={range} onChange={(e) => setRange(e.target.value)} placeholder="Sheet1!A1:D10" aria-label="Range" />
+          <Button type="submit" size="sm" loading={loading} disabled={loading || !spreadsheetId}>
+            <Search className="h-3.5 w-3.5" /> Read
+          </Button>
+        </div>
+      </form>
+      {error ? (
+        <p className="flex items-center gap-1.5 text-xs text-destructive">
+          <AlertTriangle className="h-3.5 w-3.5" /> {error}
+        </p>
+      ) : null}
+      {values ? (
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className="w-full text-xs">
+            <tbody>
+              {values.length === 0 ? (
+                <tr>
+                  <td className="px-3 py-2 text-muted-foreground">This range is empty.</td>
+                </tr>
+              ) : (
+                values.map((row, i) => (
+                  <tr key={i} className="border-b border-border last:border-0">
+                    {row.map((cell, j) => (
+                      <td key={j} className="whitespace-nowrap px-3 py-1.5">
+                        {cell}
+                      </td>
+                    ))}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

@@ -90,6 +90,12 @@ export const urlInspectionSchema = z.object({
 });
 export type UrlInspectionInput = z.infer<typeof urlInspectionSchema>;
 
+export const googleSheetsValuesSchema = z.object({
+  spreadsheetId: z.string().trim().min(1, "Choose a spreadsheet."),
+  range: z.string().trim().min(1, "Enter a range, e.g. \"Sheet1!A1:D10\"."),
+});
+export type GoogleSheetsValuesInput = z.infer<typeof googleSheetsValuesSchema>;
+
 export const seoPerformanceReportSchema = z.object({
   projectId: z.string().optional(),
   clientName: z.string().trim().min(2, "Enter a client name."),
