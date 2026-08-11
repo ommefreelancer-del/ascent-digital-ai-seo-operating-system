@@ -29,14 +29,17 @@ const STOPWORDS = new Set([
 
 const MIN_TOKEN_LENGTH = 3;
 
-function tokenize(text: string): string[] {
+// Exported so TagWeightedRoutingStrategy (routing/tag-weighted-routing-strategy.ts)
+// can tokenize task descriptions and tag/capability text the exact same way,
+// instead of duplicating the stopword list and splitting rules.
+export function tokenize(text: string): string[] {
   return text
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((token) => token.length >= MIN_TOKEN_LENGTH && !STOPWORDS.has(token));
 }
 
-function toTermSet(texts: readonly string[]): Set<string> {
+export function toTermSet(texts: readonly string[]): Set<string> {
   const terms = new Set<string>();
   for (const text of texts) {
     for (const token of tokenize(text)) {
@@ -85,12 +88,20 @@ export class KeywordMatchRoutingStrategy implements RoutingStrategy {
     if (cached) {
       return cached;
     }
-    const computed = toTermSet([
-      candidate.mission,
-      ...candidate.responsibilities,
-      ...candidate.inputs,
-      ...candidate.outputs,
-    ]);
+    // Deliberately excludes candidate.inputs. "Inputs" describes what an
+    // agent CONSUMES, not what it does or produces -- and specs routinely
+    // name-drop another agent's actual specialty there as optional/secondary
+    // context (e.g. website-audit-agent and technical-seo-agent both list
+    // "Google Search Console data" as an input, while performance-analytics-
+    // agent is the one whose *mission* that actually is). Folding Inputs into
+    // this signal lets any agent that merely mentions a data source outscore
+    // the agent whose real specialty it is -- confirmed live: a Search
+    // Console request scored technical-seo-agent and website-audit-agent
+    // identically via terms neither agent's mission/responsibilities/outputs
+    // ever mention, purely from their Inputs lists. Mission + responsibilities
+    // + outputs is what an agent actually DOES; that's the only vocabulary
+    // "does this task belong to me" should be decided from.
+    const computed = toTermSet([candidate.mission, ...candidate.responsibilities, ...candidate.outputs]);
     this.agentTermsCache.set(candidate, computed);
     return computed;
   }

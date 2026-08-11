@@ -25,6 +25,20 @@ export interface AgentSpec {
   readonly tools: readonly string[];
   readonly rules: readonly string[];
   readonly successCriteria: readonly string[];
+  /**
+   * Free-text routing keywords from an optional "## Tags" section, e.g.
+   * "seo-audit", "core-web-vitals". Defaults to an empty list for specs that
+   * don't declare tags -- purely additive, never required.
+   */
+  readonly tags: readonly string[];
+  /**
+   * Concrete, curated capability phrases from an optional "## Capabilities"
+   * section, e.g. "crawl a live website", "validate structured data".
+   * Distinct from `tags` (short routing keywords) in that these are meant to
+   * closely match how a task describes what it needs done. Defaults to an
+   * empty list for specs that don't declare capabilities.
+   */
+  readonly capabilities: readonly string[];
 }
 
 /** Raised when a spec file is missing a section the registry treats as mandatory. */
