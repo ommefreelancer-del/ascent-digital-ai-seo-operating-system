@@ -1,0 +1,61 @@
+name: CI
+
+# No CI existed before this workflow -- every regression test added to this
+# repo (Boss Agent routing matrix, Google Search Console OAuth, specialist
+# pipelines) ran only when someone remembered to run `npm test` locally.
+# This is what makes "the application must fail CI if a regression returns"
+# (see RUN_GUIDE.md and the routing-matrix.integration.test.ts history)
+# actually true instead of aspirational.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend (build, typecheck, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+  web:
+    name: Web app (build, typecheck, test)
+    runs-on: ubuntu-latest
+    needs: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+      - name: Typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Test
+        working-directory: web
+        run: npm test
+      - name: Validate startup
+        working-directory: web
+        env:
+          DATABASE_URL: "file:./prisma/dev.db"
+          NEXTAUTH_SECRET: "ci-only-secret-not-used-in-production-00000000"
+          NEXTAUTH_URL: "http://localhost:3000"
+          ANTHROPIC_API_KEY: "ci-placeholder-key-not-called"
+        run: |
+          npx prisma db push
+          node scripts/validate-startup.mjs
