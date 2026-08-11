@@ -57,5 +57,16 @@ jobs:
           NEXTAUTH_URL: "http://localhost:3000"
           ANTHROPIC_API_KEY: "ci-placeholder-key-not-called"
         run: |
+          # scripts/validate-startup.mjs deliberately reads web/.env directly
+          # off disk rather than process.env (it runs before Next.js's own
+          # env loading, which is the thing it's validating) -- so the step
+          # env above alone never reaches it. Write the same CI-only, never-
+          # real values to .env here so both prisma and the validator see them.
+          cat > .env <<EOF
+          DATABASE_URL=$DATABASE_URL
+          NEXTAUTH_SECRET=$NEXTAUTH_SECRET
+          NEXTAUTH_URL=$NEXTAUTH_URL
+          ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
+          EOF
           npx prisma db push
           node scripts/validate-startup.mjs
