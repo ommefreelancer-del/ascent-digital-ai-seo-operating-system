@@ -4,6 +4,7 @@ const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 const SITES_URL = "https://www.googleapis.com/webmasters/v3/sites";
+const URL_INSPECTION_URL = "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect";
 const SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
 
 export interface SearchConsoleSite {
@@ -181,6 +182,49 @@ export async function setSelectedSite(userId: string, siteUrl: string): Promise<
     throw new Error(`"${siteUrl}" is not a verified Search Console property for this account.`);
   }
   await db.googleSearchConsoleConnection.update({ where: { userId }, data: { selectedSiteUrl: siteUrl } });
+}
+
+export interface UrlInspectionResult {
+  inspectionResultLink: string;
+  indexStatusResult?: {
+    verdict: string;
+    coverageState?: string;
+    robotsTxtState?: string;
+    indexingState?: string;
+    lastCrawlTime?: string;
+    pageFetchState?: string;
+    googleCanonical?: string;
+    userCanonical?: string;
+    sitemap?: string[];
+    referringUrls?: string[];
+    crawledAs?: string;
+  };
+  mobileUsabilityResult?: { verdict: string };
+  richResultsResult?: { verdict: string };
+}
+
+/** Real call to Google's Search Console URL Inspection API (`urlInspection.index.inspect`) -- covered by the same webmasters.readonly scope already granted for sites.list/searchAnalytics.query, so no new consent is required. Throws with the full response body on failure. */
+export async function inspectUrl(userId: string, siteUrl: string, inspectionUrl: string): Promise<UrlInspectionResult> {
+  const accessToken = await getValidAccessToken(userId);
+  if (!accessToken) {
+    throw new Error("No Google Search Console connection exists for this user.");
+  }
+
+  const res = await fetch(URL_INSPECTION_URL, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ inspectionUrl, siteUrl }),
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`Search Console urlInspection.index.inspect failed: ${res.status} ${res.statusText} -- ${body}`);
+  }
+
+  const data: { inspectionResult?: UrlInspectionResult } = body ? JSON.parse(body) : {};
+  if (!data.inspectionResult) {
+    throw new Error("Search Console urlInspection.index.inspect returned no inspectionResult.");
+  }
+  return data.inspectionResult;
 }
 
 export interface SearchAnalyticsQuery {

@@ -19,6 +19,9 @@
 //   ## Tools / ## Rules / ## Success Criteria
 //   - item
 //
+//   ## Tags / ## Capabilities
+//   - item
+//
 // Title, Mission, and Responsibilities are treated as mandatory: a spec that
 // is missing any of them cannot be meaningfully routed to, and Engineering
 // Standards SS12 (Data Integrity) calls for reporting inconsistencies rather
@@ -79,6 +82,8 @@ export function parseAgentSpec(sourcePath: string, content: string): AgentSpec {
     tools: toBulletList(raw.sections.get("tools") ?? []),
     rules: toBulletList(raw.sections.get("rules") ?? []),
     successCriteria: toBulletList(raw.sections.get("success criteria") ?? []),
+    tags: toBulletList(raw.sections.get("tags") ?? []),
+    capabilities: toBulletList(raw.sections.get("capabilities") ?? []),
   };
 }
 

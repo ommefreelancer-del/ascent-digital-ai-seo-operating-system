@@ -84,6 +84,12 @@ export const aiUsageReportSchema = z.object({
 });
 export type AiUsageReportInput = z.infer<typeof aiUsageReportSchema>;
 
+export const urlInspectionSchema = z.object({
+  url: z.string().trim().url("Enter a valid URL, including https://"),
+  siteUrl: z.string().trim().optional(),
+});
+export type UrlInspectionInput = z.infer<typeof urlInspectionSchema>;
+
 export const seoPerformanceReportSchema = z.object({
   projectId: z.string().optional(),
   clientName: z.string().trim().min(2, "Enter a client name."),

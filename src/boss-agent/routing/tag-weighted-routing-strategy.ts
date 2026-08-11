@@ -158,7 +158,13 @@ export class TagWeightedRoutingStrategy implements RoutingStrategy {
   private getKeywordTerms(candidate: AgentSpec): Set<string> {
     const cached = this.keywordTermsCache.get(candidate);
     if (cached) return cached;
-    const computed = toTermSet([candidate.mission, ...candidate.responsibilities, ...candidate.inputs, ...candidate.outputs]);
+    // Deliberately excludes candidate.inputs -- see the matching comment in
+    // KeywordMatchRoutingStrategy.getAgentTerms() for the real regression
+    // this fixes (a Search Console request tied technical-seo-agent and
+    // website-audit-agent via terms neither agent's own mission/
+    // responsibilities/outputs mention, borrowed purely from their Inputs
+    // lists naming another agent's actual specialty as optional context).
+    const computed = toTermSet([candidate.mission, ...candidate.responsibilities, ...candidate.outputs]);
     this.keywordTermsCache.set(candidate, computed);
     return computed;
   }

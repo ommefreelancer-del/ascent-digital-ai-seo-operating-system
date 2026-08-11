@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useTheme } from "next-themes";
 import { useSearchParams } from "next/navigation";
-import { AlertTriangle, Check, Copy, KeyRound, Laptop, Link2, Moon, Plus, Sun, Trash2, Unlink } from "lucide-react";
+import { AlertTriangle, Check, Copy, ExternalLink, KeyRound, Laptop, Link2, Moon, Plus, Search, Sun, Trash2, Unlink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
 import { cn, formatRelativeTime } from "@/lib/utils";
-import { apiKeySchema, profileSchema } from "@/lib/validators";
+import { apiKeySchema, profileSchema, urlInspectionSchema } from "@/lib/validators";
 
 interface UserSettings {
   name: string;
@@ -491,6 +491,7 @@ function IntegrationsCard({ initial }: { initial: { connected: boolean; connecte
             </Button>
           )}
         </div>
+        {status.connected ? <UrlInspectionTool /> : null}
         <div className="border-t border-border pt-4">
           <Badge variant="secondary" className="mb-2">
             Coming soon
@@ -499,6 +500,135 @@ function IntegrationsCard({ initial }: { initial: { connected: boolean; connecte
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+interface UrlInspectionApiResult {
+  siteUrl: string;
+  inspectionUrl: string;
+  result: {
+    inspectionResultLink: string;
+    indexStatusResult?: {
+      verdict: string;
+      coverageState?: string;
+      robotsTxtState?: string;
+      indexingState?: string;
+      lastCrawlTime?: string;
+      pageFetchState?: string;
+      crawledAs?: string;
+    };
+  };
+}
+
+/** Verdict values come straight from Google's real urlInspection.index.inspect response (PASS/FAIL/NEUTRAL/VERDICT_UNSPECIFIED) -- never fabricated or normalized to something friendlier that could misrepresent the actual result. */
+function verdictBadgeVariant(verdict: string): "success" | "destructive" | "warning" | "secondary" {
+  if (verdict === "PASS") return "success";
+  if (verdict === "FAIL") return "destructive";
+  if (verdict === "NEUTRAL") return "warning";
+  return "secondary";
+}
+
+function UrlInspectionTool() {
+  const [url, setUrl] = React.useState("");
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [data, setData] = React.useState<UrlInspectionApiResult | null>(null);
+
+  async function inspect(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const parsed = urlInspectionSchema.safeParse({ url });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? "Enter a valid URL.");
+      return;
+    }
+    setLoading(true);
+    setData(null);
+    try {
+      const res = await fetch("/api/integrations/google-search-console/inspect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed.data),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Could not inspect this URL.");
+      setData(body);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not inspect this URL.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const index = data?.result.indexStatusResult;
+
+  return (
+    <div className="space-y-3 border-t border-border pt-4">
+      <div>
+        <p className="text-sm font-medium">URL Inspection</p>
+        <p className="text-xs text-muted-foreground">Check a URL&apos;s real Google index status via Search Console.</p>
+      </div>
+      <form onSubmit={inspect} className="flex items-center gap-2">
+        <Input
+          type="url"
+          required
+          placeholder="https://example.com/page"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          aria-label="URL to inspect"
+        />
+        <Button type="submit" size="sm" loading={loading} disabled={loading}>
+          <Search className="h-3.5 w-3.5" /> Inspect
+        </Button>
+      </form>
+      {error ? (
+        <p className="flex items-center gap-1.5 text-xs text-destructive">
+          <AlertTriangle className="h-3.5 w-3.5" /> {error}
+        </p>
+      ) : null}
+      {index ? (
+        <div className="space-y-2 rounded-lg border border-border px-3 py-3">
+          <div className="flex items-center gap-2">
+            <Badge variant={verdictBadgeVariant(index.verdict)}>{index.verdict}</Badge>
+            {index.coverageState ? <span className="text-sm">{index.coverageState}</span> : null}
+          </div>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            {index.indexingState ? (
+              <>
+                <dt>Indexing</dt>
+                <dd className="text-foreground">{index.indexingState}</dd>
+              </>
+            ) : null}
+            {index.pageFetchState ? (
+              <>
+                <dt>Last fetch</dt>
+                <dd className="text-foreground">{index.pageFetchState}</dd>
+              </>
+            ) : null}
+            {index.robotsTxtState ? (
+              <>
+                <dt>robots.txt</dt>
+                <dd className="text-foreground">{index.robotsTxtState}</dd>
+              </>
+            ) : null}
+            {index.lastCrawlTime ? (
+              <>
+                <dt>Last crawled</dt>
+                <dd className="text-foreground">{formatRelativeTime(index.lastCrawlTime)}</dd>
+              </>
+            ) : null}
+          </dl>
+          <a
+            href={data!.result.inspectionResultLink}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          >
+            View full report in Search Console <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

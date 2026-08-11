@@ -18,5 +18,11 @@
     "@types/node": "^20.14.10",
     "typescript": "^5.5.4",
     "vitest": "^2.0.5"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "cheerio": "^1.2.0",
+    "chrome-launcher": "^1.2.1",
+    "lighthouse": "^13.4.1"
   }
 }

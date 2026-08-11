@@ -37,6 +37,8 @@ import { KpiDashboardBuilder } from "./synthesis/kpi-dashboard-builder.js";
 import { AchievementChallengeBuilder } from "./synthesis/achievement-challenge-builder.js";
 import { ClientRecommendationBuilder } from "./synthesis/client-recommendation-builder.js";
 import { ExecutiveSummaryBuilder } from "./synthesis/executive-summary-builder.js";
+import { ScoreCardBuilder } from "./synthesis/score-card-builder.js";
+import { PriorityMatrixBuilder } from "./synthesis/priority-matrix-builder.js";
 import type { ClientReportingRequest, ClientReportingResult } from "./types/client-reporting-request.types.js";
 
 const PROCEED_CANDIDATE_ID = "proceed";
@@ -53,6 +55,8 @@ export class ClientReportingAgent {
     private readonly achievementChallengeBuilder: AchievementChallengeBuilder,
     private readonly clientRecommendationBuilder: ClientRecommendationBuilder,
     private readonly executiveSummaryBuilder: ExecutiveSummaryBuilder,
+    private readonly scoreCardBuilder: ScoreCardBuilder,
+    private readonly priorityMatrixBuilder: PriorityMatrixBuilder,
     private readonly approvalChannel: ApprovalChannel,
     private readonly auditLogger: AuditLogger,
   ) {}
@@ -67,6 +71,8 @@ export class ClientReportingAgent {
       new AchievementChallengeBuilder(),
       new ClientRecommendationBuilder(),
       new ExecutiveSummaryBuilder(),
+      new ScoreCardBuilder(),
+      new PriorityMatrixBuilder(),
       approvalChannel,
       new AuditLogger(config.auditLogPath),
     );
@@ -139,6 +145,16 @@ export class ClientReportingAgent {
       limitations.push("No business KPIs were supplied; the KPI dashboard reflects SEO metrics only.");
     }
 
+    let scoreCard = null;
+    let priorityMatrix = null;
+    if (request.siteAudit) {
+      scoreCard = this.scoreCardBuilder.build(request.siteAudit, request.performanceAnalytics);
+      priorityMatrix = this.priorityMatrixBuilder.build(request.siteAudit);
+      limitations.push(...scoreCard.limitations);
+    } else {
+      limitations.push("No siteAudit was supplied; the score card and priority matrix are unavailable for this report.");
+    }
+
     const result: ClientReportingResult = {
       requestId: request.id,
       clientName: request.clientName,
@@ -147,6 +163,8 @@ export class ClientReportingAgent {
       kpiDashboard,
       achievementsAndChallenges,
       recommendations,
+      scoreCard,
+      priorityMatrix,
       dataAvailable: request.performanceAnalytics.dataAvailable,
       limitations,
       decidedAt: new Date().toISOString(),

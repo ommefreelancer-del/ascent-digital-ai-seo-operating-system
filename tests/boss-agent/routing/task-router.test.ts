@@ -19,6 +19,8 @@ function makeSpec(id: string, title: string): AgentSpec {
     tools: [],
     rules: [],
     successCriteria: [],
+    tags: [],
+    capabilities: [],
   };
 }
 

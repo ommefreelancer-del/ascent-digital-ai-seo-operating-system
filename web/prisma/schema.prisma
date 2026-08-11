@@ -39,6 +39,7 @@ model User {
   contentDrafts  ContentDraft[]
   activities     ActivityEvent[]
   googleSearchConsoleConnection GoogleSearchConsoleConnection?
+  googleServiceConnections GoogleServiceConnection[]
 }
 
 model PasswordResetToken {
@@ -211,4 +212,39 @@ model GoogleSearchConsoleConnection {
   selectedSiteUrl String?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+}
+
+// Generic foundation for Google service connections beyond Search Console
+// (Business Profile, Sheets, Gmail, etc. -- Phase 2). Deliberately separate
+// from GoogleSearchConsoleConnection rather than extending it: that model's
+// `userId @unique` is a hard one-to-one constraint that can't hold more than
+// one row per user, and its `selectedSiteUrl` field has no equivalent
+// meaning for non-Search-Console services. This model is not yet used by
+// any code -- no service is wired to it in this change; it exists purely as
+// the shared data-model foundation for the Google integrations that follow.
+model GoogleServiceConnection {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // "business_profile" | "sheets" | "gmail", etc. -- one row per
+  // (user, service) pair, enforced below, so a user can hold independent
+  // connections to multiple Google services at once.
+  service      String
+  accessToken  String
+  refreshToken String
+  scope        String
+  expiresAt    DateTime
+  // Service-specific selected-resource state (e.g. a chosen Business
+  // Profile location id, a chosen spreadsheet id), JSON-encoded as a string
+  // -- matching this schema's existing convention (SeoAudit.resultJson,
+  // Report.resultJson, ChatMessage.metaJson) rather than Prisma's native
+  // Json type. Deliberately a single field rather than one nullable column
+  // per service -- a per-service column set would grow with every new
+  // service added and leave most rows mostly null; the shape for a given
+  // `service` value is validated in application code, not by the database.
+  metadataJson String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, service])
 }

@@ -89,7 +89,15 @@ describe("TagWeightedRoutingStrategy (real Agents/ directory)", () => {
     expect(decision.assignedAgentId).toBe("seo-content-agent");
   });
 
-  it("keeps a keyword-research request confidently routed to keyword-research-agent", async () => {
+  // UPDATED: this now legitimately escalates instead of auto-assigning.
+  // Dropping `inputs` from the routing vocabulary (the fix for the Google
+  // Search Console hijacking regression -- see
+  // routing-matrix.integration.test.ts's EXPECTED_TO_ESCALATE) removed enough
+  // disambiguating signal that "Research keywords for AI Automation." now
+  // scores an exact tie between keyword-research-agent and on-page-seo-agent
+  // (both 0.850045213170605) -- correctly triggering escalation for human
+  // review rather than a confident guess between two equally-scored agents.
+  it("escalates a keyword-research request for human review instead of guessing between a genuine tie", async () => {
     const registry = await AgentRegistry.load(join(REPO_ROOT, "Agents"));
     const config = loadBossAgentConfig({}, REPO_ROOT);
     const router = new TaskRouter(registry, new TagWeightedRoutingStrategy(registry.list()), {
@@ -100,8 +108,8 @@ describe("TagWeightedRoutingStrategy (real Agents/ directory)", () => {
 
     const decision = router.route({ id: "task-4", priority: "normal", description: "Research keywords for AI Automation." });
 
-    expect(decision.status).toBe("assigned");
-    expect(decision.assignedAgentId).toBe("keyword-research-agent");
+    expect(decision.status).toBe("escalated");
+    expect(decision.candidates.some((c) => c.agentId === "keyword-research-agent")).toBe(true);
   });
 
   it("keeps a guest-post request confidently routed to guest-posting-digital-pr-agent", async () => {

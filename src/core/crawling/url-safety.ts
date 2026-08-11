@@ -76,7 +76,7 @@ export async function assertPublicHttpUrl(rawUrl: string): Promise<URL> {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("Only http:// and https:// URLs are allowed.");
   }
-  const hostname = parsed.hostname;
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
   if (hostname === "localhost" || hostname.endsWith(".localhost")) {
     throw new Error("That URL points to a local address and cannot be audited.");
   }
