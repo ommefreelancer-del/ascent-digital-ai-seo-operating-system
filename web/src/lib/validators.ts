@@ -96,6 +96,116 @@ export const googleSheetsValuesSchema = z.object({
 });
 export type GoogleSheetsValuesInput = z.infer<typeof googleSheetsValuesSchema>;
 
+export const prospectSchema = z.object({
+  domain: z.string().trim().min(1, "Enter a domain."),
+  companyName: z.string().trim().max(200).optional().or(z.literal("")),
+  contactName: z.string().trim().max(200).optional().or(z.literal("")),
+  email: z.string().trim().email("Enter a valid email address.").optional().or(z.literal("")),
+  source: z.string().trim().max(80).optional().or(z.literal("")),
+  notes: z.string().trim().max(2000).optional().or(z.literal("")),
+});
+export type ProspectInput = z.infer<typeof prospectSchema>;
+
+export const prospectUpdateSchema = z.object({
+  qualificationStatus: z.enum(["pending", "qualified", "rejected"]).optional(),
+  outreachStatus: z.enum(["not-contacted", "drafted", "sent", "replied", "follow-up-due", "closed"]).optional(),
+  nextFollowUpAt: z.string().trim().optional().or(z.literal("")),
+  notes: z.string().trim().max(2000).optional().or(z.literal("")),
+  outcome: z.string().trim().max(120).optional().or(z.literal("")),
+});
+export type ProspectUpdateInput = z.infer<typeof prospectUpdateSchema>;
+
+export const gmailDraftSchema = z.object({
+  to: z.string().trim().email("Enter a valid recipient email address."),
+  subject: z.string().trim().min(1, "Enter a subject."),
+  body: z.string().trim().min(1, "Enter the email body."),
+});
+export type GmailDraftInput = z.infer<typeof gmailDraftSchema>;
+
+const pixabaySharedSearchFields = {
+  query: z.string().trim().max(100).optional().or(z.literal("")),
+  language: z.string().trim().max(10).optional().or(z.literal("")),
+  category: z.string().trim().max(40).optional().or(z.literal("")),
+  minWidth: z.coerce.number().int().min(0).max(10000).optional(),
+  minHeight: z.coerce.number().int().min(0).max(10000).optional(),
+  safeSearch: z.coerce.boolean().optional(),
+  order: z.enum(["popular", "latest"]).optional(),
+  page: z.coerce.number().int().min(1).max(1000).default(1),
+  perPage: z.coerce.number().int().min(3).max(200).default(20),
+};
+
+export const pixabayImageSearchSchema = z.object({
+  ...pixabaySharedSearchFields,
+  imageType: z.enum(["all", "photo", "illustration", "vector"]).optional(),
+  orientation: z.enum(["all", "horizontal", "vertical"]).optional(),
+});
+export type PixabayImageSearchInput = z.infer<typeof pixabayImageSearchSchema>;
+
+export const pixabayVideoSearchSchema = z.object({
+  ...pixabaySharedSearchFields,
+  videoType: z.enum(["all", "film", "animation"]).optional(),
+});
+export type PixabayVideoSearchInput = z.infer<typeof pixabayVideoSearchSchema>;
+
+export const pixabayDownloadSchema = z.object({
+  id: z.coerce.number().int().positive(),
+  url: z.string().trim().url("Enter a valid asset URL."),
+  type: z.enum(["image", "video"]),
+});
+export type PixabayDownloadInput = z.infer<typeof pixabayDownloadSchema>;
+
+export const wordPressConnectSchema = z.object({
+  siteUrl: z.string().trim().min(3, "Enter your WordPress site URL."),
+});
+export type WordPressConnectInput = z.infer<typeof wordPressConnectSchema>;
+
+export const wordPressSelectSiteSchema = z.object({
+  siteId: z.string().trim().min(1, "Choose a site."),
+});
+export type WordPressSelectSiteInput = z.infer<typeof wordPressSelectSiteSchema>;
+
+export const wordPressManualConnectSchema = z.object({
+  siteUrl: z.string().trim().min(3, "Enter your WordPress site URL."),
+  username: z.string().trim().min(1, "Enter the WordPress username."),
+  appPassword: z.string().trim().min(1, "Enter the generated Application Password."),
+});
+export type WordPressManualConnectInput = z.infer<typeof wordPressManualConnectSchema>;
+
+const wordPressContentTypeSchema = z.enum(["post", "page"]).default("post");
+
+export const wordPressDraftCreateSchema = z.object({
+  title: z.string().trim().min(1, "Enter a title."),
+  content: z.string().trim().min(1, "Enter the content."),
+  excerpt: z.string().trim().max(2000).optional().or(z.literal("")),
+  type: wordPressContentTypeSchema,
+});
+export type WordPressDraftCreateInput = z.infer<typeof wordPressDraftCreateSchema>;
+
+export const wordPressContentUpdateSchema = z.object({
+  title: z.string().trim().min(1).optional(),
+  content: z.string().trim().min(1).optional(),
+  excerpt: z.string().trim().max(2000).optional().or(z.literal("")),
+  featuredMediaId: z.coerce.number().int().positive().optional(),
+  type: wordPressContentTypeSchema,
+  confirm: z.boolean().optional(),
+});
+export type WordPressContentUpdateInput = z.infer<typeof wordPressContentUpdateSchema>;
+
+export const wordPressPublishSchema = z.object({
+  type: wordPressContentTypeSchema,
+  confirm: z.literal(true, { message: "Explicit confirmation is required to publish (confirm: true)." }),
+});
+export type WordPressPublishInput = z.infer<typeof wordPressPublishSchema>;
+
+export const wordPressListContentSchema = z.object({
+  type: wordPressContentTypeSchema,
+  status: z.string().trim().max(40).optional(),
+  search: z.string().trim().max(200).optional(),
+  page: z.coerce.number().int().min(1).max(1000).default(1),
+  perPage: z.coerce.number().int().min(1).max(100).default(10),
+});
+export type WordPressListContentInput = z.infer<typeof wordPressListContentSchema>;
+
 export const seoPerformanceReportSchema = z.object({
   projectId: z.string().optional(),
   clientName: z.string().trim().min(2, "Enter a client name."),

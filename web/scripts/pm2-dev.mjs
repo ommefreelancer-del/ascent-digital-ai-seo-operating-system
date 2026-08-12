@@ -6,12 +6,34 @@
 // spawns the prepare-backend step and the `next` binary's JS entry point
 // directly, sidestepping npm/cmd entirely.
 import { spawnSync, spawn } from "node:child_process";
+import { existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(scriptsDir, "..");
 const PORT = 3000;
+
+// `next build` (production) and `next dev` do not share a `.next` directory
+// safely: `next build` writes a `.next/BUILD_ID` file and production-mode
+// webpack chunks, and starting `next dev` directly on top of that leaves it
+// serving a mix of production and dev-mode module formats. Root-caused a
+// real incident (2026-08-12, PM2 error log) where `/api/auth/session`
+// threw "SyntaxError: Invalid or unexpected token" loading a corrupted
+// `.next/server/vendor-chunks/next.js`, which made Next.js fall back to its
+// generic HTML error page for that request -- surfacing in the browser as
+// NextAuth's CLIENT_FETCH_ERROR ("Unexpected token '<', <!DOCTYPE... is not
+// valid JSON"), since the client expected JSON and got HTML. `BUILD_ID`
+// only ever exists after `next build`, never as part of `next dev`'s own
+// output, so its presence here is an unambiguous signal that `.next` is
+// stale production output about to be handed to the dev server -- clear it
+// so `next dev` always starts from a clean, dev-mode-only `.next`.
+function clearStaleProductionBuild() {
+  const buildIdPath = path.join(webRoot, ".next", "BUILD_ID");
+  if (!existsSync(buildIdPath)) return;
+  console.log("[pm2-dev] .next holds a production `next build` (BUILD_ID present) -- clearing it before starting next dev to avoid serving corrupted/mixed-mode chunks.");
+  rmSync(path.join(webRoot, ".next"), { recursive: true, force: true });
+}
 
 // next dev has no "fail if the port is taken" mode -- left alone, it silently
 // falls back to 3001+ and PM2 still reports the app "online" (it didn't
@@ -72,6 +94,20 @@ const prepare = spawnSync(process.execPath, [path.join(scriptsDir, "prepare-back
 if (prepare.status !== 0) {
   process.exit(prepare.status ?? 1);
 }
+
+// Aborts here (never spawns next dev) on a missing env var, an unbuilt
+// backend, a broken/duplicated agent registry, or an ungenerated Prisma
+// client -- surfacing the exact cause immediately instead of letting PM2
+// report a misleadingly "online" process that fails the first real request.
+const validation = spawnSync(process.execPath, [path.join(scriptsDir, "validate-startup.mjs")], {
+  cwd: webRoot,
+  stdio: "inherit",
+});
+if (validation.status !== 0) {
+  process.exit(validation.status ?? 1);
+}
+
+clearStaleProductionBuild();
 
 const nextBin = path.join(webRoot, "node_modules", "next", "dist", "bin", "next");
 const child = spawn(process.execPath, [nextBin, "dev"], {

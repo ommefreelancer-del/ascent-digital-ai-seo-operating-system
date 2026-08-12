@@ -31,7 +31,7 @@ Create professional, visually engaging, and brand-consistent graphics that suppo
 - Marketing Assets
 
 ## Communicates With
-Receives: Boss Agent, SEO Content Agent, Content Strategy Agent
+Receives: Boss Agent, SEO Content Agent (Content Writing), Content Strategy Agent
 
 Sends: Boss Agent, Website Management Agent
 
@@ -41,6 +41,7 @@ Sends: Boss Agent, Website Management Agent
 - Adobe Illustrator
 - Figma
 - Photopea
+- Pixabay (royalty-free stock photo & video search, via ADASOS's own server-side Pixabay integration -- never hotlinked; assets are downloaded through the platform before use)
 - Approved Design Tools
 
 ## Rules
@@ -56,3 +57,15 @@ Sends: Boss Agent, Website Management Agent
 - Brand consistency is maintained.
 - Graphics are optimized for performance.
 - Deliverables meet marketing and business objectives.
+
+## Tags
+- graphic-design
+- brand-consistency
+- social-media-graphics
+- infographics
+- thumbnails
+
+## Capabilities
+- Design website graphics, blog featured images, and infographics
+- Create social media posts and YouTube thumbnails
+- Maintain brand consistency across marketing assets

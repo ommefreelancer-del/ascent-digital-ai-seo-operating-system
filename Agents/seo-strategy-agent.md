@@ -32,7 +32,7 @@ Develop a prioritized, business-focused SEO strategy that drives sustainable org
 - Action Plan
 
 ## Communicates With
-Receives: Boss Agent, Website Audit Agent, Competitor Intelligence Agent, Keyword Research Agent, Performance Analytics Agent
+Receives: Boss Agent, Website Audit Agent, Competitor Intelligence Agent, Keyword Research & Search Intent Agent, Performance & Analytics Agent
 
 Sends: Boss Agent, Content Strategy Agent, On-Page SEO Agent, Technical SEO Agent, Off-Page SEO Agent
 
@@ -55,3 +55,16 @@ Sends: Boss Agent, Content Strategy Agent, On-Page SEO Agent, Technical SEO Agen
 - Recommendations are actionable and measurable.
 - Business goals and SEO strategy are aligned.
 - The roadmap supports sustainable organic growth.
+
+## Tags
+- seo-strategy
+- seo-roadmap
+- growth-opportunities
+- quick-wins
+- business-alignment
+- strategic-priorities
+
+## Capabilities
+- Build 30/60/90-day SEO roadmaps prioritized by impact and ROI
+- Align SEO strategy with business goals and client requirements
+- Recommend content, technical, on-page, and off-page priorities

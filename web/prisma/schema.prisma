@@ -40,6 +40,8 @@ model User {
   activities     ActivityEvent[]
   googleSearchConsoleConnection GoogleSearchConsoleConnection?
   googleServiceConnections GoogleServiceConnection[]
+  prospects Prospect[]
+  wordPressConnection WordPressConnection?
 }
 
 model PasswordResetToken {
@@ -247,4 +249,77 @@ model GoogleServiceConnection {
   updatedAt    DateTime @updatedAt
 
   @@unique([userId, service])
+}
+
+// The canonical, structured record for a prospect/client -- Gmail is
+// deliberately NOT the system of record (see server/gmail.ts): this row
+// holds the durable status/qualification/scheduling data, while
+// gmailThreadId/gmailDraftId/gmailLastMessageId are references only, so the
+// real email content is always fetched live from Gmail, never duplicated
+// here. Mirrors the fields this pipeline's real backend agents already
+// produce (Agents/prospecting-agent.md through Agents/outreach-agent.md --
+// domain, source, qualification decision, verified contact) plus the
+// outreach lifecycle state those agents deliberately stop short of (per
+// GLOBAL_RULES.md SS9, only a human, via this app, ever actually sends).
+model Prospect {
+  id          String @id @default(cuid())
+  userId      String
+  user        User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  domain      String
+  companyName String?
+  contactName String?
+  email       String?
+  // Free text, e.g. "prospecting-agent", "google-sheets-import", "manual".
+  source              String    @default("manual")
+  qualificationStatus String    @default("pending") // pending | qualified | rejected
+  outreachStatus      String    @default("not-contacted") // not-contacted | drafted | sent | replied | follow-up-due | closed
+  lastContactedAt     DateTime?
+  nextFollowUpAt      DateTime?
+  // The one Gmail thread for this prospect's outreach conversation --
+  // follow-ups reply within it rather than each prospect accumulating
+  // multiple unrelated threads. Null until a draft has been created.
+  gmailThreadId      String?
+  gmailDraftId       String?
+  gmailLastMessageId String?
+  notes   String?
+  outcome String? // e.g. "won", "lost", "no-response" -- null while still open
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, domain])
+  @@index([userId, outreachStatus])
+  @@index([userId, nextFollowUpAt])
+}
+
+// One WordPress site connection per user, supporting two independent auth
+// providers (see server/wordpress.ts):
+//  - "self-hosted": WordPress core's own Application Passwords feature
+//    (WP 5.6+, no plugin), a long-lived per-site credential used as HTTP
+//    Basic Auth -- username/appPassword.
+//  - "wordpress-com": WordPress.com's OAuth2 (developer.wordpress.com/docs/oauth2),
+//    a Bearer access token good for any site the user selects via
+//    /me/sites site discovery -- accessToken/wpcomSiteId.
+// Both providers ultimately talk to the same wp/v2-shaped REST surface
+// (self-hosted: {siteUrl}/wp-json/wp/v2; wordpress-com: proxied through
+// public-api.wordpress.com/wp/v2/sites/{wpcomSiteId}), so every content
+// operation in server/wordpress.ts is provider-agnostic -- only the
+// connection's own auth fields differ. `userId @unique` matches this
+// codebase's existing single-connection-per-service convention.
+model WordPressConnection {
+  id       String @id @default(cuid())
+  userId   String @unique
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider String @default("self-hosted") // "self-hosted" | "wordpress-com"
+  siteUrl  String
+  siteName String?
+  // Self-hosted only (Application Passwords / HTTP Basic Auth).
+  username    String?
+  appPassword String?
+  // wordpress-com only (OAuth2 / Bearer). wpcomSiteId is null until the
+  // user has picked a site (only ambiguous when they manage more than
+  // one) -- see selectWordPressComSite() in server/wordpress.ts.
+  accessToken String?
+  wpcomSiteId String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }

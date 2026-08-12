@@ -4,13 +4,16 @@ import { getServerAuthSession } from "@/server/auth";
 import { db } from "@/server/db";
 import { getConnectionStatus } from "@/server/google-search-console";
 import { getConnectionStatus as getGoogleSheetsConnectionStatus } from "@/server/google-sheets";
+import { getConnectionStatus as getGmailConnectionStatus } from "@/server/gmail";
+import { getConnectionStatus as getPixabayConnectionStatus } from "@/server/pixabay";
+import { getConnectionStatus as getWordPressConnectionStatus } from "@/server/wordpress";
 import { redirect } from "next/navigation";
 
 export default async function SettingsPage() {
   const session = await getServerAuthSession();
   if (!session) redirect("/login");
 
-  const [user, apiKeys, googleSearchConsole, googleSheets] = await Promise.all([
+  const [user, apiKeys, googleSearchConsole, googleSheets, gmail, pixabay, wordpress] = await Promise.all([
     db.user.findUnique({
       where: { id: session.user.id },
       select: {
@@ -31,6 +34,9 @@ export default async function SettingsPage() {
     }),
     getConnectionStatus(session.user.id),
     getGoogleSheetsConnectionStatus(session.user.id),
+    getGmailConnectionStatus(session.user.id),
+    getPixabayConnectionStatus(),
+    getWordPressConnectionStatus(session.user.id),
   ]);
 
   if (!user) redirect("/login");
@@ -48,6 +54,9 @@ export default async function SettingsPage() {
           }))}
           initialGoogleSearchConsole={googleSearchConsole}
           initialGoogleSheets={googleSheets}
+          initialGmail={gmail}
+          initialPixabay={pixabay}
+          initialWordPress={wordpress}
         />
       </div>
     </>
