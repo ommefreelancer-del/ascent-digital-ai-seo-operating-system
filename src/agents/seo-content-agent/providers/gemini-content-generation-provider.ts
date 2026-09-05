@@ -1,49 +1,59 @@
-// A real ContentGenerationProvider backed by the Anthropic API, following
-// the exact pattern already proven in web/src/server/backend/specialist-ai.ts
-// (same @anthropic-ai/sdk usage, same ANTHROPIC_API_KEY/ANTHROPIC_MODEL env
-// var convention). This is an explicit opt-in: SeoContentAgent.create()
-// still defaults to NullContentGenerationProvider, consistent with
-// GLOBAL_RULES.md SS9 ("connecting external services" requires deliberate
-// configuration, not a silent default).
+// A real ContentGenerationProvider backed by the official Google Gemini API
+// (https://ai.google.dev/gemini-api/docs), via Google's official Node.js SDK
+// (@google/genai, https://ai.google.dev/gemini-api/docs/quickstart). This is
+// an explicit opt-in, alternative to ../../seo-content-agent/providers/
+// anthropic-content-generation-provider.ts: SeoContentAgent.create() still
+// defaults to NullContentGenerationProvider, and this file deliberately does
+// not touch that Anthropic provider or web/src/server/backend/specialist-ai.ts
+// (the separate, already-live, already-production Claude-based system every
+// one of ADASOS's 27 agents already uses for its chat responses) -- adding a
+// second production LLM here does not replace or compete with that; it is a
+// second, independently-selectable real implementation of this one narrow
+// interface (SEO content generation), reusing the exact same seam pattern
+// the Anthropic provider already established -- including its prompt
+// content (see that file's own "CONTENT FRAMEWORK HARDENING" header for the
+// full rationale; kept identical here for parity between the two providers).
 //
-// CONTENT FRAMEWORK HARDENING (2026-08-28): prompts below implement the
-// user-supplied Content Writing Framework's core principles directly --
-// people-first content, no forced keyword density, natural semantic
-// coverage (not a mandatory LSI list), section-role-aware structure
-// (introduction / body / FAQ / conclusion each get different guidance,
-// never one generic instruction for all four), H3 used only where genuinely
-// useful, no generic AI-opener clichés, and a real anti-fabrication
-// reminder on every call. These are the user's OWN content-writing
-// preferences, not encoded as if they were Google ranking requirements --
-// nothing here claims a specific technique affects search rankings.
+// Model: gemini-flash-latest by default -- Google's own rolling alias for
+// the current stable Flash model, confirmed working with a real API call
+// during implementation. The originally-selected "gemini-2.5-flash" (matched
+// against ai.google.dev/gemini-api/docs/models and the installed SDK's own
+// JSDoc examples at the time) was found, via that same real call, to now
+// return a real 404 from Google: "This model models/gemini-2.5-flash is no
+// longer available to new users." Google's model lineup moves fast enough
+// that a hardcoded specific version is a real reliability risk; the rolling
+// alias avoids repeating this exact failure. Pin a specific version via
+// GOOGLE_GEMINI_MODEL if you need reproducible behavior across a model
+// rollover.
 //
-// BEGINNER-FIRST / SEARCH-INTENT HARDENING (2026-09-05): every prompt below
-// additionally now drives the article toward the user's strongest reference
-// output ("Blog 6"): search-intent-first framing, an internal beginner ->
-// practical -> deeper -> advanced structure, a what-is-it / why-it-matters /
-// what-should-the-reader-do formula for substantial sections, a per-sentence
-// reader-value bar, and a factual-discipline rule against unqualified
-// ranking/SEO claims. FAQ prompts additionally forbid the "the article does
-// not directly answer..." hedge-then-speculate pattern -- either the
-// question is genuinely answerable from the real content, or it shouldn't be
-// asked. None of this changes the pre-existing anti-fabrication, natural-
-// keyword, or structural (H3/H4) rules below -- it only adds to them.
+// Cost/safety: a Gemini API key from Google AI Studio (ai.google.dev) is
+// free by default and, per Google's own documentation, CANNOT incur charges
+// on its own -- moving from the free tier to a billed tier requires a
+// separate, explicit, human action in Google Cloud Console ("set up and link
+// an active billing account"). This module never sets `vertexai: true` (the
+// GoogleGenAI SDK's alternate, always-billed Vertex AI backend), so it only
+// ever talks to the free-tier-eligible Gemini Developer API path.
 //
-// TEMPORARY VALIDATION-MODE WORD CAP: `SEO_CONTENT_VALIDATION_MAX_WORDS`, read
-// by validationWordCap() below, is a testing-only knob to bound API/credit
-// spend while validating the above prompt changes against a live model. Unset
-// (the default), it changes nothing. It must never be set in normal production
-// use, and it is not a substitute for -- nor does it relax -- the "optimize for
-// usefulness and query satisfaction, not word count" rule the framework above
-// already encodes; it only trims how much prose a single validation run asks
-// the model to produce.
+// BEGINNER-FIRST / SEARCH-INTENT HARDENING (2026-09-05): kept identical to
+// anthropic-content-generation-provider.ts's own prompts -- see that file's
+// header for the full rationale (search-intent-first framing, beginner ->
+// practical -> deeper -> advanced structure, the what-is-it / why-it-matters
+// / what-should-the-reader-do formula, the reader-value bar, the no-
+// unqualified-ranking-claims rule, and the FAQ no-hedge-then-speculate rule).
 //
-// On any failure (no API key configured, the API call fails, Claude returns
-// no usable text), every method returns `null` rather than fabricating
-// placeholder prose -- the same "unavailable, not guessed" contract every
-// provider in this codebase follows.
+// TEMPORARY VALIDATION-MODE WORD CAP: `SEO_CONTENT_VALIDATION_MAX_WORDS`,
+// read by validationWordCap() below -- kept identical to the sibling
+// Anthropic provider's own knob for the same reason (bounding API/credit
+// spend while validating the above prompt changes). Unset (the default),
+// it changes nothing.
+//
+// On any failure (no API key configured, the API call fails, Gemini returns
+// no text), every method returns `null` rather than fabricating placeholder
+// prose -- the same "unavailable, not guessed" contract every provider in
+// this codebase follows.
 
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI } from "@google/genai";
+import { GeminiRateLimiter } from "./gemini-rate-limiter.js";
 import type {
   ContentGenerationProvider,
   ContentGenerationRequest,
@@ -57,23 +67,27 @@ import type {
   MetaGenerationRequest,
   QaFeedback,
 } from "../types/content-generation-provider.types.js";
-import { ProviderBillingUnavailableError, isBillingOrAccessFailure } from "./provider-billing-unavailable-error.js";
 
-const DEFAULT_MODEL = "claude-sonnet-5";
-// BEGINNER-FIRST / SEARCH-INTENT HARDENING (2026-09-05): raised from 1536 -- a live validation run
-// showed the richer, more thorough per-section guidance above (the what-is-it/why-it-matters/what-to-do
-// formula, real H3 steps, progressive depth) can genuinely need more than 1536 tokens for a substantial
-// body section, and a truncated mid-sentence section is a real defect QA correctly flags
-// (topic_adequately_covered, facts_supported) -- this raises the ceiling, it does not target a length.
-const SECTION_MAX_TOKENS = 2048;
-const META_MAX_TOKENS = 400;
-const FAQ_ANSWER_MAX_TOKENS = 400;
-const FAQ_QUESTIONS_MAX_TOKENS = 500; // headroom for ~6 questions, up from a 2-5 guidance
-const QA_MAX_TOKENS = 700;
+const DEFAULT_MODEL = "gemini-flash-latest";
+// BEGINNER-FIRST / SEARCH-INTENT HARDENING (2026-09-05): kept in parity with the sibling Anthropic
+// provider's own raise -- see that file's constant for the full rationale (a live validation run showed
+// the richer per-section guidance can genuinely need more than 1536 tokens, and a truncated mid-sentence
+// section is a real defect, not an acceptable length trade-off).
+const SECTION_MAX_OUTPUT_TOKENS = 2048;
+const META_MAX_OUTPUT_TOKENS = 400;
+const FAQ_ANSWER_MAX_OUTPUT_TOKENS = 400;
+const FAQ_QUESTIONS_MAX_OUTPUT_TOKENS = 500; // headroom for ~6 questions, up from a 2-5 guidance
+const QA_MAX_OUTPUT_TOKENS = 700;
+// LIVE VALIDATION FIX (2026-08-31): a live run showed repeated real "This operation was aborted" call
+// failures under genuine Gemini-side load ("This model is currently experiencing high demand" 503s were
+// also observed in the same run) -- 30s was cutting off calls that would otherwise have succeeded a
+// little slower. 45s gives real slow-but-genuine responses more room without being unbounded.
+const REQUEST_TIMEOUT_MS = 45_000;
 
-// Appended to a prompt only on a revision pass (see QaFeedback's own header
-// in content-generation-provider.types.ts for why revision works this way
-// instead of asking for the whole article back as one JSON blob).
+// Appended to a prompt only on a revision pass -- kept identical to
+// anthropic-content-generation-provider.ts's own function; see QaFeedback's
+// header in content-generation-provider.types.ts for why revision works this
+// way instead of asking for the whole article back as one JSON blob.
 function qaFeedbackBlock(feedback: QaFeedback | null | undefined): string {
   if (!feedback) return "";
   return [
@@ -85,9 +99,7 @@ function qaFeedbackBlock(feedback: QaFeedback | null | undefined): string {
   ].join("\n");
 }
 
-// Shared across every prompt below -- the framework's own core rules that
-// apply regardless of section role. Kept as one constant so every call site
-// states them identically rather than drifting out of sync.
+// Kept identical to anthropic-content-generation-provider.ts's own constant -- see that file's header for why.
 const SHARED_WRITING_RULES = [
   "Write for the human reader first -- the goal is genuinely useful, original, clearly explained content, never content written merely to manipulate search rankings.",
   "Never invent facts, statistics, dates, prices, studies, quotations, expert opinions, testimonials, or first-hand experience that weren't given to you. If a specific fact would strengthen the section but you don't have it, write around it generically instead of making one up.",
@@ -142,7 +154,7 @@ function roleGuidance(role: ContentSectionRole, heading: string, targetKeyword: 
       ].join("\n");
     case "faq":
       // Not called by the real pipeline (ContentSectionDrafter skips generateSection entirely for the FAQ
-      // heading -- see its own header for why a separate lead-in sentence was found to be redundant filler).
+      // heading -- see that file's own header for why a separate lead-in sentence was found to be redundant filler).
       // Kept only so a direct caller of this provider gets a safe instruction, never a fabricated lead-in.
       return `This is the article's FAQ section heading (heading: "${heading}"). Return an empty string -- the real FAQ questions and answers are rendered separately; no lead-in sentence is needed.`;
     case "conclusion":
@@ -307,14 +319,10 @@ function renderArticleForReview(
   sections: readonly { readonly heading: string; readonly body: string }[],
   faqs: readonly { readonly question: string; readonly answer: string }[],
 ): string {
-  // Mirrors the REAL rendering (see web/src/server/backend/content.ts's summarizeSeoContentForChat):
-  // the FAQ heading always has an empty body (its real content is the Q&A list, never a separate
-  // generated lead-in -- see content-section-drafter.ts), so the Q&A pairs render INLINE under that
-  // same heading, never as a second, separately-labeled "## FAQ" block after it. An earlier version
-  // of this function rendered those as two adjacent H2-like blocks, which a live QA self-check
-  // correctly flagged as a broken heading hierarchy -- a real defect in this reconstruction, not in
-  // the actual article, but one that then sent the revision loop chasing a problem that didn't exist
-  // in the real rendered output.
+  // Mirrors the REAL rendering (see web/src/server/backend/content.ts's summarizeSeoContentForChat) --
+  // kept identical to anthropic-content-generation-provider.ts's own function; see that file's header
+  // for why the Q&A pairs render INLINE under the FAQ heading rather than as a second, separately-
+  // labeled "## FAQ" block (a live QA self-check flagged the two-block shape as a broken hierarchy).
   const faqBlock = faqs.length > 0 ? faqs.map((f) => `Q: ${f.question}\nA: ${f.answer}`).join("\n\n") : "";
   let faqInlined = false;
   const sectionBlocks = sections.map((s) => {
@@ -389,69 +397,73 @@ function stripFence(text: string): string {
   return text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
 }
 
-export class AnthropicContentGenerationProvider implements ContentGenerationProvider {
-  readonly name = "anthropic";
-  private readonly client: Anthropic | null;
-  private readonly model: string;
-  // Opt-in only -- FallbackContentGenerationProvider is the sole caller that sets this. Every other
-  // caller/test keeps today's exact behavior (a billing/access failure still returns null, never
-  // throws), so this is not a breaking change to the provider's existing contract.
-  private readonly throwOnBillingFailure: boolean;
+export interface GeminiContentGenerationProviderOptions {
+  readonly apiKey?: string;
+  readonly model?: string;
+  /** Shared across every Gemini-backed provider in one process so the whole pipeline paces itself against ONE real quota -- see gemini-rate-limiter.ts. Defaults to a private instance when not supplied (e.g. in tests). */
+  readonly rateLimiter?: GeminiRateLimiter;
+}
 
-  constructor(options: { apiKey?: string; model?: string; throwOnBillingFailure?: boolean } = {}) {
-    const apiKey = options.apiKey ?? process.env["ANTHROPIC_API_KEY"];
-    this.client = apiKey ? new Anthropic({ apiKey }) : null;
-    this.model = options.model ?? process.env["ANTHROPIC_MODEL"] ?? DEFAULT_MODEL;
-    this.throwOnBillingFailure = options.throwOnBillingFailure ?? false;
+export class GeminiContentGenerationProvider implements ContentGenerationProvider {
+  readonly name = "gemini";
+  private readonly client: GoogleGenAI | null;
+  private readonly model: string;
+  private readonly rateLimiter: GeminiRateLimiter;
+
+  constructor(options: GeminiContentGenerationProviderOptions = {}) {
+    const apiKey = options.apiKey ?? process.env["GOOGLE_GEMINI_API_KEY"];
+    // No `vertexai` option is set -- this deliberately stays on the
+    // free-tier-eligible Gemini Developer API path, never Vertex AI.
+    this.client = apiKey ? new GoogleGenAI({ apiKey }) : null;
+    this.model = options.model ?? process.env["GOOGLE_GEMINI_MODEL"] ?? DEFAULT_MODEL;
+    this.rateLimiter = options.rateLimiter ?? new GeminiRateLimiter();
   }
 
-  private async complete(prompt: string, maxTokens: number): Promise<string | null> {
+  private async complete(prompt: string, maxOutputTokens: number): Promise<string | null> {
     if (!this.client) return null;
     try {
-      // thinking is explicitly disabled: some prompts here (the QA pass in
-      // particular, which reasons over a full article against 18 checks)
-      // otherwise trigger the model's own extended-thinking tokens, which
-      // count against maxTokens -- a long enough reasoning pass can consume
-      // the entire budget and leave zero tokens for the actual answer,
-      // silently producing a null result with no error to catch.
-      const message = await this.client.messages.create({
-        model: this.model,
-        max_tokens: maxTokens,
-        thinking: { type: "disabled" },
-        messages: [{ role: "user", content: prompt }],
+      const text = await this.rateLimiter.run(async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        try {
+          // thinkingBudget: 0 disables Gemini's own extended-thinking tokens, which
+          // otherwise count against maxOutputTokens -- the sibling Anthropic provider
+          // hit this exact failure mode live (a long reasoning-heavy prompt consumed
+          // the entire token budget on reasoning, leaving none for the actual answer).
+          const response = await this.client!.models.generateContent({
+            model: this.model,
+            contents: prompt,
+            config: { maxOutputTokens, abortSignal: controller.signal, thinkingConfig: { thinkingBudget: 0 } },
+          });
+          return response.text;
+        } finally {
+          clearTimeout(timeout);
+        }
       });
-      const text = message.content.find((block): block is Anthropic.TextBlock => block.type === "text")?.text;
       return text ? text.trim() : null;
     } catch (error) {
-      // Never fabricates a fallback -- still returns null -- but a bare silent catch here made a
-      // real API failure (e.g. a rate limit from many concurrent per-section calls) indistinguishable
-      // from "no API key configured" or "Claude returned no text", which cost real debugging time
-      // live. Logs only the error's own message/status -- never the prompt content or the API key.
-      const status = error && typeof error === "object" && "status" in error ? (error as { status?: unknown }).status : undefined;
-      console.error(`[AnthropicContentGenerationProvider] API call failed${status ? ` (status ${status})` : ""}: ${error instanceof Error ? error.message : String(error)}`);
-      if (this.throwOnBillingFailure && isBillingOrAccessFailure(error)) {
-        throw new ProviderBillingUnavailableError(this.name);
-      }
+      // Never fabricates a fallback -- still returns null -- but logging the real error (never the
+      // prompt content or the API key) is what let a real production failure (a rate limit from many
+      // concurrent per-section calls) get diagnosed instead of looking identical to "no API key".
+      console.error(`[GeminiContentGenerationProvider] API call failed: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   }
 
   async generateSection(request: ContentGenerationRequest): Promise<GeneratedSection | null> {
     const wordCap = validationWordCap();
-    // TEMPORARY VALIDATION-MODE WORD CAP: shrinks the token budget to roughly match the word cap
-    // instructed in the prompt (see buildSectionPrompt), so a validation run actually spends less --
-    // never applied unless SEO_CONTENT_VALIDATION_MAX_WORDS is explicitly set. The multiplier and floor
-    // give real headroom above the requested word count (markdown/punctuation overhead, not a hard
-    // truncation boundary) while still capping well under the normal SECTION_MAX_TOKENS.
-    const maxTokens = wordCap
-      ? Math.min(SECTION_MAX_TOKENS, sectionWordBudget(wordCap, request.allHeadings.length) * 4 + 80)
-      : SECTION_MAX_TOKENS;
-    const text = await this.complete(buildSectionPrompt(request), maxTokens);
+    // TEMPORARY VALIDATION-MODE WORD CAP -- kept identical to the sibling Anthropic provider's own
+    // logic; see that file's generateSection() for the full rationale. Never applied unless
+    // SEO_CONTENT_VALIDATION_MAX_WORDS is explicitly set.
+    const maxOutputTokens = wordCap
+      ? Math.min(SECTION_MAX_OUTPUT_TOKENS, sectionWordBudget(wordCap, request.allHeadings.length) * 4 + 80)
+      : SECTION_MAX_OUTPUT_TOKENS;
+    const text = await this.complete(buildSectionPrompt(request), maxOutputTokens);
     return text ? { heading: request.heading, body: text } : null;
   }
 
   async generateMetaContent(request: MetaGenerationRequest): Promise<GeneratedMetaContent | null> {
-    const text = await this.complete(buildMetaPrompt(request), META_MAX_TOKENS);
+    const text = await this.complete(buildMetaPrompt(request), META_MAX_OUTPUT_TOKENS);
     if (!text) return null;
     try {
       const parsed = JSON.parse(stripFence(text)) as { metaTitle?: unknown; metaDescription?: unknown };
@@ -465,11 +477,11 @@ export class AnthropicContentGenerationProvider implements ContentGenerationProv
   }
 
   async generateFaqAnswer(request: FaqAnswerGenerationRequest): Promise<string | null> {
-    return this.complete(buildFaqAnswerPrompt(request), FAQ_ANSWER_MAX_TOKENS);
+    return this.complete(buildFaqAnswerPrompt(request), FAQ_ANSWER_MAX_OUTPUT_TOKENS);
   }
 
   async generateFaqQuestions(request: FaqQuestionGenerationRequest): Promise<readonly string[] | null> {
-    const text = await this.complete(buildFaqQuestionsPrompt(request), FAQ_QUESTIONS_MAX_TOKENS);
+    const text = await this.complete(buildFaqQuestionsPrompt(request), FAQ_QUESTIONS_MAX_OUTPUT_TOKENS);
     if (!text) return null;
     try {
       const parsed = JSON.parse(stripFence(text)) as unknown;
@@ -483,7 +495,7 @@ export class AnthropicContentGenerationProvider implements ContentGenerationProv
   }
 
   async evaluateContent(request: ContentQaRequest): Promise<ContentQaVerdict | null> {
-    const text = await this.complete(buildQaPrompt(request), QA_MAX_TOKENS);
+    const text = await this.complete(buildQaPrompt(request), QA_MAX_OUTPUT_TOKENS);
     if (!text) return null;
     try {
       const parsed = JSON.parse(stripFence(text)) as { passed?: unknown; failedChecks?: unknown; notes?: unknown };

@@ -13,6 +13,9 @@ describe("NullContentGenerationProvider", () => {
       targetKeyword: "emergency plumber",
       heading: "Introduction",
       brandGuidelines: null,
+      allHeadings: ["Introduction"],
+      sectionRole: "introduction",
+      relatedKeywords: [],
     });
     expect(result).toBeNull();
   });
