@@ -60,6 +60,14 @@ The exact test file inventory and coverage for either the root package or `web/`
 
 Not confirmed whether Publisher Qualification, Contact Intelligence, and Reply & Negotiation stages are wired into one continuous, chat-dispatched real pipeline the way the SEO content-generation pipeline is. See each stage's individual agent doc and `technical/workflows/GUEST_POSTING_OUTREACH_WORKFLOW.md`.
 
+## Documentation-internal correction (maintenance pass, 2026-09-06)
+
+### Correction 1 — `admin/SECURITY_AND_GOVERNANCE.md` overstated Google service-connection token encryption
+
+**What was found:** `admin/SECURITY_AND_GOVERNANCE.md`'s "Credential encryption at rest" section previously listed the shared Google service connection tokens (`GoogleServiceConnection` — Business Profile, Sheets, Analytics, Drive, Gmail) under "Confirmed encrypted as of this pass," grouped with `GitHubConnection`, Google Search Console, and WordPress. This did not match `technical/SECURITY_ARCHITECTURE.md`, which already correctly listed `GoogleServiceConnection`'s token fields as "Not independently call-site-verified in this pass" — only a schema comment claims the same encryption mechanism; no `encryptSecret(`/`decryptSecret(` call site for this specific model was confirmed the way it was for the other three connection types.
+
+**Correction applied:** `admin/SECURITY_AND_GOVERNANCE.md` now matches `technical/SECURITY_ARCHITECTURE.md`'s more cautious, already-accurate wording — `GoogleServiceConnection` is listed separately as not independently call-site-verified, rather than grouped with the confirmed connections. No new code verification was performed and no claim was upgraded; this is a wording correction to remove an inconsistency between two documents describing the same fact, not a resolution of the underlying open item. `GoogleServiceConnection` token encryption remains an open item for a future pass to call-site-verify.
+
 ## Engineering Follow-ups (recorded, not fixed — documentation-only task)
 
 1. `.env.example`'s `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` comment documents an incorrect redirect URI and an incorrect description of purpose (implies NextAuth login; it is actually a shared Google service-connection OAuth credential). Source file to review: `web/.env.example`.

@@ -29,7 +29,7 @@ The documentation is organized into three layers, by audience:
 |---|---|
 | Documentation version | 2.0 (three-layer restructure) |
 | Supersedes | Version 1.0 (the flat, single-layer documentation pass — files preserved under `docs/_legacy-v1/`, see note below) |
-| Last verified against repository | See the date of this documentation pass's commit history; every claim herein was checked directly against source code, not carried forward from assumption |
+| Last verified against repository | 2026-09-06 — the commit that finalized this documentation set (`docs: finalize three-layer system documentation`, commit `1272cba9`); every claim herein was checked directly against source code as of that pass, not carried forward from assumption |
 | Repository/implementation state covered | Root backend (`adasos-boss-agent`, frozen Boss Agent routing engine) + `web/` (`adasos-web` v2.0.0, the real Next.js 15/React 19 product) |
 | Overall status | **PARTIALLY VERIFIED** — the large majority of claims are directly confirmed by code read (grep/read of the exact function or config referenced); a smaller number of items are explicitly labeled `NOT VERIFIED IN CURRENT CODEBASE` throughout, most of which are also indexed in `technical/DOCUMENTATION_CONFLICTS.md` |
 | Major known limitations | (1) Not a multi-tenant SaaS product today — see `admin/SUBSCRIPTION_READINESS.md`. (2) Current deployment is a single-machine, single-process local Windows setup, not a hosted production deployment — see `admin/DEPLOYMENT_OPERATIONS.md`. (3) Several agents' real integrations are not confirmed wired into their own chat dispatch — see `agents/INDEX.md`'s "Split / dual-path" and "Role-play" groups. (4) No automated database backup exists yet — see `admin/DATA_AND_STORAGE.md`. |
