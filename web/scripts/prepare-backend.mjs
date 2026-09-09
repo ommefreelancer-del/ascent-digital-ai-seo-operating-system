@@ -19,10 +19,23 @@ if (existsSync(distEntry)) {
 }
 
 console.log("[prepare-backend] Building the ADASOS backend (../) so the web app can import its compiled agents...");
-const result = spawnSync("npm", ["run", "build"], {
+
+// PRODUCTION INCIDENT (2026-09-08, PM2 error log): PM2's daemon spawned this
+// script with an inherited PATH that did not resolve `npm` at all (Windows,
+// PM2 running as a background/service-like process rather than an
+// interactive shell) -- `spawnSync("npm", ...)` failed instantly with
+// "'npm' is not recognized...", 8 times back to back within 5 seconds,
+// burning through pm2-dev.mjs's whole restart budget before `next dev` ever
+// got a chance to start. Exactly the same class of problem pm2-dev.mjs
+// already solved for `next dev` itself (see that file's own header comment)
+// -- so apply the same fix here: invoke the backend's build tool (tsc, per
+// its own package.json "build" script) as a plain JS entry point via this
+// exact node.exe (`process.execPath`), never through npm/cmd, so a missing
+// or PATH-stripped `npm` can no longer break this step.
+const tscBin = path.join(backendRoot, "node_modules", "typescript", "bin", "tsc");
+const result = spawnSync(process.execPath, [tscBin, "-p", "tsconfig.json"], {
   cwd: backendRoot,
   stdio: "inherit",
-  shell: true,
 });
 
 if (result.status !== 0) {
