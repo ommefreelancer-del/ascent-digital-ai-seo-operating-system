@@ -28,14 +28,45 @@ if [ -z "$staged_additions" ]; then
   exit 0
 fi
 
-untracked=$(git status --porcelain --untracked-files=all | grep '^??' | awk '{print $2}' || true)
+# BASELINE FIX (2026-09-10): a commit that DOES add new file(s) still needs
+# this check -- that's the actual incident, a real new file never added --
+# but this repo genuinely carries a large amount of separate, long-running,
+# untracked work-in-progress at any given time, and blocking every new-file
+# commit until ALL of that unrelated work is either added or gitignored made
+# it impossible to land a small, deliberate, already-reviewed new-file
+# commit (e.g. a new lib file plus its own test) without touching work that
+# belongs to a different, in-progress task. .githooks/known-untracked.txt is
+# a versioned, reviewable snapshot of untracked paths already known about
+# and deliberately left out -- ONLY an untracked file NOT already on that
+# list (i.e. something that just appeared, unaccounted for) still blocks
+# the commit, which is exactly the "forgot to add a new file" signal this
+# hook exists to catch. See that file's own header for how to update it.
+untracked_raw=$(git status --porcelain --untracked-files=all | grep '^??' | awk '{print $2}' || true)
 
-if [ -n "$untracked" ]; then
-  echo "pre-commit: refusing to commit -- this commit adds new file(s), and untracked files also exist that it won't include:" >&2
-  echo "$untracked" | sed 's/^/  /' >&2
+if [ -z "$untracked_raw" ]; then
+  exit 0
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+baseline_file="$repo_root/.githooks/known-untracked.txt"
+
+untracked=$(printf '%s\n' "$untracked_raw" | LC_ALL=C sort)
+
+if [ -f "$baseline_file" ]; then
+  known=$(grep -v '^#' "$baseline_file" | grep -v '^[[:space:]]*$' | LC_ALL=C sort || true)
+  unexpected=$(comm -23 <(printf '%s\n' "$untracked") <(printf '%s\n' "$known") || true)
+else
+  unexpected="$untracked"
+fi
+
+if [ -n "$unexpected" ]; then
+  echo "pre-commit: refusing to commit -- this commit adds new file(s), and untracked file(s) exist that aren't on the known-untracked baseline:" >&2
+  echo "$unexpected" | sed 's/^/  /' >&2
   echo >&2
-  echo "Either 'git add' them (they're production files that belong in this commit)" >&2
-  echo "or add a pattern for them to the nearest .gitignore (they're generated/local)." >&2
+  echo "Either 'git add' them (they're production files that belong in this commit)," >&2
+  echo "add a pattern for them to the nearest .gitignore (they're generated/local)," >&2
+  echo "or, if they're deliberate pre-existing unrelated work you're intentionally" >&2
+  echo "leaving untracked, add them to .githooks/known-untracked.txt." >&2
   echo "This check exists so new files never again silently go untracked -- see RUN_GUIDE.md." >&2
   exit 1
 fi
