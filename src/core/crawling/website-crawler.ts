@@ -1,11 +1,14 @@
-// Real multi-page crawling: fetches robots.txt, discovers sitemap.xml (from
-// robots.txt Sitemap: lines, falling back to /sitemap.xml), then crawls
-// every internal page reachable from the start URL plus every same-origin
-// sitemap URL (breadth-first, bounded by maxPages). Every page's real HTTP
-// status and real redirect chain is recorded -- this is genuine crawl
-// evidence for the site-level checks (broken links, redirect chains,
-// internal-linking graph) that WebsiteAuditAgent's single-page contract
-// cannot produce on its own.
+// Real multi-page crawling: fetches robots.txt (relative to the crawled
+// site's own start URL, e.g. https://user.github.io/repo/robots.txt for a
+// GitHub-Pages-style project site -- never the bare account-level origin),
+// discovers sitemap.xml (from robots.txt Sitemap: lines, falling back to
+// sitemap.xml resolved the same site-relative way), then crawls every
+// internal page reachable from the start URL plus every same-origin sitemap
+// URL (breadth-first, bounded by maxPages). Every page's real HTTP status
+// and real redirect chain is recorded -- this is genuine crawl evidence for
+// the site-level checks (broken links, redirect chains, internal-linking
+// graph) that WebsiteAuditAgent's single-page contract cannot produce on
+// its own.
 
 import { fetchHtmlWithDetails, FetchHtmlError } from "./fetch-html.js";
 import { parseRobotsTxt, isPathAllowed, type ParsedRobotsTxt } from "./robots-txt-parser.js";
@@ -68,9 +71,9 @@ function canonicalOrigin(url: URL): string {
   return `${url.protocol}//${host}${port}`;
 }
 
-async function discoverSitemapUrls(origin: string, robotsTxt: ParsedRobotsTxt | null, limitations: string[]): Promise<string[]> {
+async function discoverSitemapUrls(siteBaseUrl: string, robotsTxt: ParsedRobotsTxt | null, limitations: string[]): Promise<string[]> {
   const sitemapUrls: string[] = [];
-  const candidates = robotsTxt?.sitemaps.length ? [...robotsTxt.sitemaps] : [new URL("/sitemap.xml", origin).toString()];
+  const candidates = robotsTxt?.sitemaps.length ? [...robotsTxt.sitemaps] : [new URL("sitemap.xml", siteBaseUrl).toString()];
 
   for (const sitemapUrl of candidates.slice(0, MAX_SITEMAP_CANDIDATES)) {
     try {
@@ -101,24 +104,48 @@ export async function crawlWebsite(startUrl: string, options: WebsiteCrawlerOpti
   const userAgent = options.userAgent ?? DEFAULT_USER_AGENT;
   const limitations: string[] = [];
   const origin = new URL(startUrl).origin;
-  // Used for same-site scoping decisions only (queue/link filtering) -- the
-  // real (non-normalized) `origin` above is still what's used to build
-  // actual fetch URLs (robots.txt, sitemap.xml fallback), so this never
-  // changes which host is actually requested, only which discovered URLs
-  // count as "this site" for crawl inclusion.
+  // Used for same-site scoping decisions only (queue/link filtering, and as
+  // the relative-resolution base for a discovered link's own URL) -- see
+  // siteBaseUrl below for what robots.txt/sitemap.xml are actually fetched
+  // relative to.
   const siteOrigin = canonicalOrigin(new URL(startUrl));
+
+  // PROJECT-SITE TARGETING FIX (2026-09-10): robots.txt and the sitemap.xml
+  // fallback used to be resolved against the bare account-level `origin`
+  // (new URL("/robots.txt", origin)) -- for a normal root-hosted site this
+  // is identical to the site's own base, but for a GitHub-Pages-style
+  // "project site" (https://user.github.io/repo/) it silently discards the
+  // "/repo/" path prefix and lands on shared account-root infrastructure
+  // that has nothing to do with the site actually being audited. Confirmed,
+  // real incident: https://user.github.io/robots.txt (account root) returns
+  // a completely different, genuinely unrelated robots.txt with no
+  // Sitemap: line at all, while the real, live
+  // https://user.github.io/repo/robots.txt DOES list the site's real
+  // sitemap.xml -- the bare-origin fetch silently discovered the WRONG
+  // robots.txt, found no Sitemap: reference, fell back to an equally wrong
+  // account-root /sitemap.xml (404), and reported "0 sitemap URLs" for a
+  // site whose real, published sitemap was there the entire time. Resolving
+  // both relative to the site's own start URL fixes this generically (not
+  // GitHub-specific): for a root-hosted site siteBaseUrl === origin + "/",
+  // so behavior there is unchanged; only a non-root-hosted site's discovery
+  // actually changes. Matches the exact same principle
+  // sitemap-remediation-planner.ts's own "PROJECT-SITE TARGETING FIX"
+  // already applies to its sitemap.xml WRITE target -- discovery and
+  // remediation now agree on where this site's own robots.txt/sitemap.xml
+  // really live.
+  const siteBaseUrl = startUrl.endsWith("/") ? startUrl : `${startUrl}/`;
 
   let robotsTxt: ParsedRobotsTxt | null = null;
   let robotsTxtContent: string | null = null;
   try {
-    const result = await fetchHtmlWithDetails(new URL("/robots.txt", origin).toString());
+    const result = await fetchHtmlWithDetails(new URL("robots.txt", siteBaseUrl).toString());
     robotsTxtContent = result.html;
     robotsTxt = parseRobotsTxt(result.html);
   } catch (error) {
     limitations.push(`robots.txt could not be fetched: ${errorMessage(error)}`);
   }
 
-  const sitemapUrls = await discoverSitemapUrls(origin, robotsTxt, limitations);
+  const sitemapUrls = await discoverSitemapUrls(siteBaseUrl, robotsTxt, limitations);
 
   const queue: { url: string; discoveredFrom: string | null }[] = [{ url: startUrl, discoveredFrom: null }];
   const sameOriginSitemapUrls = sitemapUrls.filter((u) => {

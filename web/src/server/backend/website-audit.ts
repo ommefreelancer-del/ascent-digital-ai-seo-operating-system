@@ -12,7 +12,7 @@ async function importBackend(relativeToSrc: string) {
   return import(/* webpackIgnore: true */ `file://${path.join(backendDist, relativeToSrc)}`);
 }
 
-let agentsPromise: Promise<{ siteAuditOrchestrator: any; onPageAgent: any; techSeoAgent: any; crawlWebsite: any }> | null = null;
+let agentsPromise: Promise<{ siteAuditOrchestrator: any; onPageAgent: any; techSeoAgent: any; crawlWebsite: any; dedupeDirectoryIndexVariants: any }> | null = null;
 
 async function getAgents() {
   if (!agentsPromise) {
@@ -25,6 +25,7 @@ async function getAgents() {
         { TechnicalSeoAgent },
         { loadTechnicalSeoAgentConfig },
         { crawlWebsite },
+        { dedupeDirectoryIndexVariants },
       ] = await Promise.all([
         importBackend("agents/website-audit-agent/site-audit-orchestrator.js"),
         importBackend("agents/website-audit-agent/config/website-audit-agent.config.js"),
@@ -33,6 +34,7 @@ async function getAgents() {
         importBackend("agents/technical-seo-agent/technical-seo-agent.js"),
         importBackend("agents/technical-seo-agent/config/technical-seo-agent.config.js"),
         importBackend("core/crawling/website-crawler.js"),
+        importBackend("core/crawling/dedupe-directory-index-variants.js"),
       ]);
 
       // SiteAuditOrchestrator supersedes the frozen single-page WebsiteAuditAgent
@@ -52,7 +54,7 @@ async function getAgents() {
         loadTechnicalSeoAgentConfig({ auditLogPath: path.join(backendRoot, "var", "web", "technical-seo-agent", "audit-log.jsonl") }, backendRoot),
         createWebApprovalChannel(),
       );
-      return { siteAuditOrchestrator, onPageAgent, techSeoAgent, crawlWebsite };
+      return { siteAuditOrchestrator, onPageAgent, techSeoAgent, crawlWebsite, dedupeDirectoryIndexVariants };
     })();
   }
   return agentsPromise;
@@ -110,6 +112,8 @@ export interface CrawlSummary {
   readonly robotsTxtFound: boolean;
   readonly sitemapChecked: boolean;
   readonly sitemapUrlsFound: number;
+  /** SITEMAP REMEDIATION CAPABILITY (2026-08-22): the real, successfully-fetched page URLs from THIS SAME crawl -- the ONLY real source sitemap-remediation-planner.ts is allowed to draw sitemap entries from. Never includes a page that failed to fetch/was blocked. */
+  readonly crawledUrls: readonly string[];
   readonly limitations: readonly string[];
   readonly decidedAt: string;
 }
@@ -129,7 +133,19 @@ export interface FullAuditResult {
   readonly lighthouse: LighthouseSummary;
 }
 
-const MAX_CRAWL_PAGES = 15;
+// CRAWL BUDGET FIX (2026-09-10): 15 was an arbitrary, undocumented override
+// of the crawler's own built-in default (website-crawler.ts's
+// DEFAULT_MAX_PAGES = 50) -- real evidence it was too small: a genuinely
+// small ~14-page portfolio site with a modest 6-post blog and a real,
+// correctly-discovered sitemap.xml (18 URLs total: the site's other pages,
+// discovered via links, are already ~12 of that budget) needs more than 15
+// pages to actually reach the sitemap-seeded, otherwise-unlinked articles
+// queued near the end of a real sitemap's URL list -- the crawler's own
+// FIFO/BFS order means a too-small budget silently truncates exactly the
+// pages sitemap discovery exists to find. Aligning with the crawler's own
+// already-established default removes an arbitrary, demonstrably
+// insufficient number rather than inventing a new one.
+const MAX_CRAWL_PAGES = 50;
 
 export interface RawCrawledPage {
   readonly url: string;
@@ -141,6 +157,8 @@ export interface RawCrawledPage {
   readonly outcome?: string;
   readonly durationMs?: number | null;
   readonly redirectChain?: readonly string[];
+  /** The real, fetched HTML body, or `null` if this page was never successfully fetched. Used only to detect a directory/index.html URL pair that serves byte-identical content -- see dedupeDirectoryIndexVariants(). */
+  readonly html?: string | null;
 }
 
 /**
@@ -210,7 +228,7 @@ function logAuditDiagnostics(requestedUrl: string, crawlResult: { pages: readonl
  * web/src/app/api/seo-audit/route.ts.
  */
 export async function runFullAudit(url: string, targetKeyword: string): Promise<FullAuditResult> {
-  const { siteAuditOrchestrator, onPageAgent, techSeoAgent, crawlWebsite } = await getAgents();
+  const { siteAuditOrchestrator, onPageAgent, techSeoAgent, crawlWebsite, dedupeDirectoryIndexVariants } = await getAgents();
 
   // Crawl once, directly, so the real robots.txt/sitemap.xml evidence
   // (WebsiteCrawlResult.robotsTxtContent / .sitemapUrls) is available for
@@ -284,6 +302,25 @@ export async function runFullAudit(url: string, targetKeyword: string): Promise<
     robotsTxtFound: crawlResult.robotsTxtContent !== null,
     sitemapChecked: true,
     sitemapUrlsFound: crawlResult.sitemapUrls.length,
+    // SITEMAP REMEDIATION CAPABILITY (2026-08-22): only genuinely,
+    // successfully-fetched pages (outcome === "success") -- never a page
+    // that was blocked, errored, or never reached.
+    //
+    // DUPLICATE-VARIANT FIX (2026-09-10): a real crawl commonly discovers
+    // BOTH "https://site/about/" and "https://site/about/index.html" as two
+    // separate, genuinely successful fetches (a directory URL resolves to
+    // its own index.html by web-server convention) -- listing both in a
+    // generated sitemap would propose two URLs for what is actually one
+    // page. dedupeDirectoryIndexVariants() drops the index.html entry only
+    // when its directory sibling was ALSO crawled with byte-identical HTML
+    // (real, observed content -- never guessed from the URL shape alone),
+    // keeping the directory-style URL. See
+    // src/core/crawling/dedupe-directory-index-variants.ts's own header.
+    crawledUrls: dedupeDirectoryIndexVariants(
+      (crawlResult.pages as RawCrawledPage[])
+        .filter((p) => p.outcome === "success")
+        .map((p) => ({ url: p.finalUrl ?? p.url, html: p.html ?? null })),
+    ),
     limitations: siteResult.limitations,
     decidedAt: siteResult.decidedAt,
   };
