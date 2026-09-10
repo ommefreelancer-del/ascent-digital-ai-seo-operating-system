@@ -400,6 +400,7 @@ web/tests/server/rbac.test.ts
 web/tests/server/workspace-messages-attachment-wiring.test.ts
 web/tests/server/workspace-messages-competitor-intelligence-wiring.test.ts
 web/tests/server/workspace-messages-keyword-research-wiring.test.ts
+web/tests/server/workspace-messages-on-page-seo-evidence-wiring.test.ts
 web/tests/server/workspace-messages-routing-context-handoff.test.ts
 web/tests/server/workspace-messages-step6-hardening.test.ts
 web/tests/server/workspace-messages-technical-seo-wiring.test.ts
