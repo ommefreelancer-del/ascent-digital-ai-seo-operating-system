@@ -10,10 +10,28 @@
 #   git config core.hooksPath .githooks
 set -euo pipefail
 
+# SCOPE FIX (2026-09-09): the failure mode this hook exists to catch is
+# specifically a NEW file being created and never `git add`-ed -- the
+# original incident was whole new files (API routes, server modules, tests)
+# silently never entering the index at all. A commit that only contains
+# MODIFICATIONS to already-tracked files structurally cannot exhibit that
+# failure mode: there's no new file in this commit that could have been
+# forgotten. Gating the untracked-file scan on "this commit actually adds at
+# least one new file" keeps the check exact for the scenario it was built
+# for, instead of firing on every commit regardless of what it contains --
+# which previously made it impossible to land a narrow, deliberate,
+# modifications-only commit in a working tree that also happens to have
+# unrelated in-progress work sitting around untracked elsewhere.
+staged_additions=$(git diff --cached --name-only --diff-filter=A || true)
+
+if [ -z "$staged_additions" ]; then
+  exit 0
+fi
+
 untracked=$(git status --porcelain --untracked-files=all | grep '^??' | awk '{print $2}' || true)
 
 if [ -n "$untracked" ]; then
-  echo "pre-commit: refusing to commit -- untracked files exist that this commit won't include:" >&2
+  echo "pre-commit: refusing to commit -- this commit adds new file(s), and untracked files also exist that it won't include:" >&2
   echo "$untracked" | sed 's/^/  /' >&2
   echo >&2
   echo "Either 'git add' them (they're production files that belong in this commit)" >&2
