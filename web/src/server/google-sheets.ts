@@ -85,27 +85,50 @@ export async function getValidAccessToken(userId: string): Promise<string | null
   return refreshed.access_token;
 }
 
-/** Real call to the Drive API's files.list, filtered to spreadsheets only. Throws with the full response body on failure -- callers must not swallow it into a generic message. */
+/**
+ * SPREADSHEET-DISCOVERY FIX (2026-09-13): two real, confirmed gaps in the original single-page,
+ * My-Drive-only query -- (1) `pageSize: 25` with no `nextPageToken` follow-up meant any spreadsheet
+ * past the first 25 (by `modifiedTime desc`) was silently invisible everywhere the list is used
+ * (Settings selectors, write-destination ownership check, chat context); (2) no `corpora`/
+ * `includeItemsFromAllDrives`/`supportsAllDrives` params meant Drive's default `corpora=user` was used,
+ * which covers "My Drive" + files individually shared with the user but NOT files living in a Shared
+ * Drive the user has access to -- a real Google Sheets file (e.g. one converted from an uploaded Excel
+ * file) can legitimately live in either place. Neither fix touches OAuth scope: `drive.metadata.readonly`
+ * already covers everything these params expose; this only widens which of the user's OWN
+ * already-authorized files the query is allowed to see, not what the token is allowed to do.
+ */
 export async function listSpreadsheets(userId: string): Promise<SpreadsheetFile[]> {
   const accessToken = await getValidAccessToken(userId);
   if (!accessToken) {
     throw new Error("No Google Sheets connection exists for this user.");
   }
 
-  const params = new URLSearchParams({
-    q: "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
-    fields: "files(id,name,modifiedTime)",
-    pageSize: "25",
-    orderBy: "modifiedTime desc",
-  });
-  const res = await fetch(`${DRIVE_FILES_URL}?${params.toString()}`, { headers: { Authorization: `Bearer ${accessToken}` } });
-  const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`Drive files.list failed: ${res.status} ${res.statusText} -- ${body}`);
-  }
+  const files: SpreadsheetFile[] = [];
+  let pageToken: string | undefined;
+  do {
+    const params = new URLSearchParams({
+      q: "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+      fields: "nextPageToken,files(id,name,modifiedTime)",
+      pageSize: "100",
+      orderBy: "modifiedTime desc",
+      corpora: "allDrives",
+      includeItemsFromAllDrives: "true",
+      supportsAllDrives: "true",
+    });
+    if (pageToken) params.set("pageToken", pageToken);
 
-  const data: { files?: SpreadsheetFile[] } = body ? JSON.parse(body) : {};
-  return data.files ?? [];
+    const res = await fetch(`${DRIVE_FILES_URL}?${params.toString()}`, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const body = await res.text();
+    if (!res.ok) {
+      throw new Error(`Drive files.list failed: ${res.status} ${res.statusText} -- ${body}`);
+    }
+
+    const data: { files?: SpreadsheetFile[]; nextPageToken?: string } = body ? JSON.parse(body) : {};
+    files.push(...(data.files ?? []));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  return files;
 }
 
 /** Real call to the Sheets API's spreadsheets.values.get. Throws with the full response body on failure. */

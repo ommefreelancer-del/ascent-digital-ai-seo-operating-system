@@ -78,6 +78,97 @@ describe("listSpreadsheets", () => {
     await expect(listSpreadsheets("user-1")).rejects.toThrow("No Google Sheets connection exists for this user.");
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  // SPREADSHEET-DISCOVERY FIX (2026-09-13): real regression coverage for the confirmed production
+  // defect -- a real user's newly-created spreadsheet never appeared anywhere in the Settings
+  // selectors. Two real, provable code-level gaps: (J) only the first Drive results page was ever
+  // fetched (no pageToken follow-up), and (corpus) the query never asked Drive to include Shared
+  // Drive-resident files. Neither fix touches OAuth scope -- same drive.metadata.readonly token
+  // throughout.
+
+  it("J: follows Drive's nextPageToken until exhausted -- a spreadsheet on page 2+ (e.g. beyond the first 100 by modifiedTime) is never silently dropped", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => JSON.stringify({ nextPageToken: "page-2-token", files: [{ id: "sheet-1", name: "Admin Sheet Health", modifiedTime: "2026-09-10T00:00:00Z" }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => JSON.stringify({ files: [{ id: "sheet-2", name: "Health Master", modifiedTime: "2026-09-01T00:00:00Z" }] }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { listSpreadsheets } = await import("../../src/server/google-sheets");
+    const result = await listSpreadsheets("user-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondUrl = fetchMock.mock.calls[1]![0] as string;
+    expect(secondUrl).toContain("pageToken=page-2-token");
+    expect(result).toEqual([
+      { id: "sheet-1", name: "Admin Sheet Health", modifiedTime: "2026-09-10T00:00:00Z" },
+      { id: "sheet-2", name: "Health Master", modifiedTime: "2026-09-01T00:00:00Z" },
+    ]);
+  });
+
+  it("A/C: returns every spreadsheet from a single page, including a newly-created one, when there is no nextPageToken", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          files: [
+            { id: "sheet-1", name: "Admin Sheet Health", modifiedTime: "2026-09-10T00:00:00Z" },
+            { id: "sheet-2", name: "Health Master", modifiedTime: "2026-09-12T00:00:00Z" },
+            { id: "sheet-3", name: "Client Tracker", modifiedTime: "2026-08-01T00:00:00Z" },
+          ],
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { listSpreadsheets } = await import("../../src/server/google-sheets");
+    const result = await listSpreadsheets("user-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.map((f) => f.name)).toEqual(["Admin Sheet Health", "Health Master", "Client Tracker"]);
+  });
+
+  it("corpus: requests corpora=allDrives, includeItemsFromAllDrives=true, and supportsAllDrives=true -- so a spreadsheet living in a Shared Drive is not silently excluded by Drive's default 'My Drive'-only corpus", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ files: [] }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { listSpreadsheets } = await import("../../src/server/google-sheets");
+    await listSpreadsheets("user-1");
+
+    const url = fetchMock.mock.calls[0]![0] as string;
+    expect(url).toContain("corpora=allDrives");
+    expect(url).toContain("includeItemsFromAllDrives=true");
+    expect(url).toContain("supportsAllDrives=true");
+  });
+
+  it("K: two spreadsheets with the identical name are both returned, distinguishable only by their real, stable Drive file id -- never deduplicated or merged by name", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          files: [
+            { id: "sheet-a", name: "Report", modifiedTime: "2026-09-10T00:00:00Z" },
+            { id: "sheet-b", name: "Report", modifiedTime: "2026-09-05T00:00:00Z" },
+          ],
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { listSpreadsheets } = await import("../../src/server/google-sheets");
+    const result = await listSpreadsheets("user-1");
+
+    expect(result).toHaveLength(2);
+    expect(result.map((f) => f.id)).toEqual(["sheet-a", "sheet-b"]);
+    expect(new Set(result.map((f) => f.id)).size).toBe(2);
+  });
 });
 
 describe("getSpreadsheetValues", () => {
