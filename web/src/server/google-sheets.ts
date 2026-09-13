@@ -176,7 +176,16 @@ export interface AllSpreadsheetValuesResult {
   cappedAtSafetyLimit: boolean;
 }
 
-export async function getAllSpreadsheetValues(userId: string, spreadsheetId: string): Promise<AllSpreadsheetValuesResult> {
+export interface GetAllSpreadsheetValuesOptions {
+  /** Overrides MAX_TOTAL_ROWS for this call only -- e.g. server-side deterministic processing
+   * (google-sheets-cleaning.ts) never embeds raw rows in an LLM prompt, so it can safely use a much
+   * higher ceiling than the default (which stays tuned for "safe to embed verbatim in a chat context").
+   * Omitted (the default) preserves the EXACT existing 5000-row behavior for every current caller. */
+  readonly maxTotalRows?: number;
+}
+
+export async function getAllSpreadsheetValues(userId: string, spreadsheetId: string, options?: GetAllSpreadsheetValuesOptions): Promise<AllSpreadsheetValuesResult> {
+  const maxTotalRows = options?.maxTotalRows ?? MAX_TOTAL_ROWS;
   const values: string[][] = [];
   let startRow = 1;
   let batchesRead = 0;
@@ -192,7 +201,7 @@ export async function getAllSpreadsheetValues(userId: string, spreadsheetId: str
     const reachedRealEndOfData = result.values.length < BATCH_ROW_SIZE;
     if (reachedRealEndOfData) break;
 
-    if (values.length >= MAX_TOTAL_ROWS) {
+    if (values.length >= maxTotalRows) {
       cappedAtSafetyLimit = true;
       break;
     }

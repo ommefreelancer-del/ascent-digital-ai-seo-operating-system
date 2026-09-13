@@ -337,4 +337,37 @@ describe("getAllSpreadsheetValues", () => {
     const { getAllSpreadsheetValues } = await import("../../src/server/google-sheets");
     await expect(getAllSpreadsheetValues("user-1", "sheet-1")).rejects.toThrow(/Sheets spreadsheets\.values\.get failed: 403 Forbidden.*insufficient permission/);
   });
+
+  // MAX-ROWS OVERRIDE (2026-09-14): real regression coverage for the confirmed follow-on defect -- the
+  // AI Workspace agent could still only ever receive up to ~5,000 rows (this function's own default
+  // ceiling, tuned for "safe to embed verbatim in an LLM prompt"). Server-side deterministic processing
+  // (google-sheets-cleaning.ts) never embeds raw rows in a prompt at all, so it needs a genuinely higher
+  // ceiling to read a real "Health Master Sheet" (reported 5,000+ rows) to its true end. `maxTotalRows`
+  // is an OPTIONAL override -- omitting it (every existing caller) preserves the exact original 5,000-row
+  // behavior unchanged.
+  it("maxTotalRows override: a caller that opts into a higher ceiling reads past the default 5,000-row cap", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const rows = Array.from({ length: 7000 }, (_, i) => [`row-${i}`]);
+    const fetchMock = batchedFetchMock(rows);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getAllSpreadsheetValues } = await import("../../src/server/google-sheets");
+    const result = await getAllSpreadsheetValues("user-1", "sheet-1", { maxTotalRows: 10_000 });
+
+    expect(result.rowsRead).toBe(7000); // past the OLD 5,000 default -- proves the override genuinely takes effect
+    expect(result.cappedAtSafetyLimit).toBe(false); // real end of data (a short final batch), not the override ceiling either
+  });
+
+  it("maxTotalRows omitted: preserves the EXACT original 5,000-row default for every existing caller, unchanged", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const endlessRows = Array.from({ length: 1_000_000 }, (_, i) => [`row-${i}`]);
+    const fetchMock = batchedFetchMock(endlessRows);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getAllSpreadsheetValues } = await import("../../src/server/google-sheets");
+    const result = await getAllSpreadsheetValues("user-1", "sheet-1"); // no options -- same call shape as every existing caller
+
+    expect(result.rowsRead).toBe(5000);
+    expect(result.cappedAtSafetyLimit).toBe(true);
+  });
 });
