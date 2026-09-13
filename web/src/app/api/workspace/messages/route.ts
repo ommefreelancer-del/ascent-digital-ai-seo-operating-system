@@ -8,6 +8,7 @@ import { generateSpecialistReply } from "@/server/backend/specialist-ai";
 import { buildSearchConsoleContext } from "@/server/backend/performance-analytics";
 import { runFullAudit, type FullAuditResult } from "@/server/backend/website-audit";
 import { runContentGenerationPipeline, CONTENT_PIPELINE_ENTRY_AGENT_ID, type PipelineStepTrace } from "@/server/backend/specialist-orchestrator";
+import { processSelectedGoogleSheet } from "@/server/backend/google-sheets-cleaning";
 import { shouldRouteBackToWebsiteAuditAgent, matchWebsiteAuditFollowUpTerm } from "@/server/backend/follow-up-routing";
 import { logActivity } from "@/server/log-activity";
 import { truncate } from "@/lib/utils";
@@ -17,6 +18,13 @@ import { truncate } from "@/lib/utils";
 // WEBSITE_AUDIT_AGENT_ID for the canonical backend constant this mirrors).
 const WEBSITE_AUDIT_AGENT_ID = "website-audit-agent";
 const PERFORMANCE_ANALYTICS_AGENT_ID = "performance-analytics-agent";
+// Matches the real Google Sheets Integration Agent spec id (Agents/google-sheets-integration-agent.md).
+const GOOGLE_SHEETS_INTEGRATION_AGENT_ID = "google-sheets-integration-agent";
+// Deliberately narrow, local to this route: only the operation verbs that mean "read/clean the selected
+// sheet" -- a bare "is my Google Sheet connected?" question must NOT create a real pending cleaning
+// approval, so this route never dispatches to processSelectedGoogleSheet() for every message assigned to
+// the agent, only for a recognizable cleaning-type request.
+const GOOGLE_SHEETS_CLEANING_REQUEST_PATTERN = /\b(clean\w*|dedup\w*|process\w*|normali[sz]\w*|duplicate\w*|read\w*|inspect\w*)\b/i;
 const URL_PATTERN = /https?:\/\/[^\s)>\]"']+/i;
 // Fallback for a URL typed without a protocol ("audit example.com"). Deliberately
 // conservative: requires a real-looking multi-label domain with a letters-only
@@ -195,6 +203,25 @@ export async function POST(request: Request) {
       } catch (error) {
         const reason = error instanceof Error ? error.message : "an unknown error";
         assistantContent = `${response.reply}\n\n(The automated content pipeline could not complete: ${reason})`;
+      }
+    } else if (
+      decision?.status === "assigned" &&
+      decision.assignedAgentId === GOOGLE_SHEETS_INTEGRATION_AGENT_ID &&
+      GOOGLE_SHEETS_CLEANING_REQUEST_PATTERN.test(message)
+    ) {
+      // REAL DISPATCH (LIVE GOOGLE SHEETS CLEANING WIRING, 2026-09-15): processSelectedGoogleSheet()
+      // (server/backend/google-sheets-cleaning.ts) reads the user's own already-selected Google Sheet
+      // through the real, already-connected read-only integration (batched, non-truncating), then runs
+      // the same deterministic cleaning pipeline the file-upload path uses -- entirely server-side, no
+      // spreadsheet row is ever sent to the LLM. Only fires for a recognizable cleaning-type request (see
+      // GOOGLE_SHEETS_CLEANING_REQUEST_PATTERN above) -- a bare connection-status question for this agent
+      // still falls through, unaffected, to the generic assigned-agent branch below.
+      try {
+        const processingResult = await processSelectedGoogleSheet(userId);
+        assistantContent = processingResult.reply;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "an unknown error";
+        assistantContent = `I tried to read your selected Google Sheet to clean it, but it failed: ${reason}`;
       }
     } else if (decision?.status === "assigned" && decision.assignedAgentId) {
       try {
