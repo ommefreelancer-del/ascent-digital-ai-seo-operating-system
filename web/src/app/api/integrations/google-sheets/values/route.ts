@@ -1,7 +1,25 @@
 import { NextResponse } from "next/server";
 import { getServerAuthSession } from "@/server/auth";
-import { getSpreadsheetValues, setSelectedSpreadsheet, listSpreadsheets } from "@/server/google-sheets";
+import { getSpreadsheetValues, setSelectedSpreadsheet, getSelectedSpreadsheet, listSpreadsheets } from "@/server/google-sheets";
 import { googleSheetsValuesSchema } from "@/lib/validators";
+
+/**
+ * READ-SELECTOR PERSISTENCE FIX (2026-09-13): counterpart to write-destination/route.ts's own GET --
+ * previously nothing exposed the persisted read selection to the client at all, so Settings ->
+ * Integrations had no way to restore a user's explicit choice on page load/refresh and instead fell back
+ * to auto-selecting whichever spreadsheet the Drive list happened to return first. The frontend is
+ * responsible for confirming this id still appears in a fresh listSpreadsheets() result before trusting
+ * it (never silently substituting another spreadsheet if it doesn't).
+ */
+export async function GET() {
+  const session = await getServerAuthSession();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const selected = await getSelectedSpreadsheet(session.user.id);
+  return NextResponse.json({ selected });
+}
 
 export async function POST(request: Request) {
   const session = await getServerAuthSession();

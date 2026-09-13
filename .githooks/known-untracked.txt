@@ -350,6 +350,7 @@ web/tests/server/backend/content-images.test.ts
 web/tests/server/backend/content.test.ts
 web/tests/server/backend/conversation-routing-smoke.test.ts
 web/tests/server/backend/deliverables.test.ts
+web/tests/server/backend/doctor-flow-reaudit-verdict.test.ts
 web/tests/server/backend/doctor-flow.test.ts
 web/tests/server/backend/gemini-rate-limiter.test.ts
 web/tests/server/backend/google-sheets-integration.test.ts
@@ -377,7 +378,9 @@ web/tests/server/backend/spreadsheet-processing.test.ts
 web/tests/server/backend/spreadsheet-reader.test.ts
 web/tests/server/backend/system-readiness.test.ts
 web/tests/server/backend/web-development.test.ts
+web/tests/server/backend/website-audit-on-page-evidence.test.ts
 web/tests/server/backend/website-audit-routing-priority.integration.test.ts
+web/tests/server/backend/website-audit-summarize-source-label.test.ts
 web/tests/server/backend/xlsx-writer.test.ts
 web/tests/server/bing-webmaster.test.ts
 web/tests/server/credential-encryption.test.ts
@@ -401,7 +404,10 @@ web/tests/server/workspace-messages-attachment-wiring.test.ts
 web/tests/server/workspace-messages-competitor-intelligence-wiring.test.ts
 web/tests/server/workspace-messages-keyword-research-wiring.test.ts
 web/tests/server/workspace-messages-on-page-seo-evidence-wiring.test.ts
+web/tests/server/workspace-messages-reaudit-verify-wiring.test.ts
 web/tests/server/workspace-messages-routing-context-handoff.test.ts
 web/tests/server/workspace-messages-step6-hardening.test.ts
+web/tests/server/workspace-messages-technical-seo-evidence-retrieval.test.ts
+web/tests/server/workspace-messages-technical-seo-fix-execution-gap.test.ts
 web/tests/server/workspace-messages-technical-seo-wiring.test.ts
 web/tests/server/workspace-session-spreadsheet-cleaning-reload.test.ts

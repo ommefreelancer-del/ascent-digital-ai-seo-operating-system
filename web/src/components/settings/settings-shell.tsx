@@ -920,6 +920,18 @@ function GoogleSheetsTool() {
   const [error, setError] = React.useState<string | null>(null);
   const [values, setValues] = React.useState<string[][] | null>(null);
 
+  // EXPLICIT READ-SELECTION FIX (2026-09-13): a real, live-confirmed defect -- this selector used to
+  // unconditionally auto-select spreadsheets[0] the instant the Drive list loaded (whichever spreadsheet
+  // was most recently modified, per listSpreadsheets()'s own orderBy), with no "not yet selected" state
+  // and no persisted-selection restore on mount. That made ADASOS silently pick a spreadsheet for the
+  // user instead of the user explicitly choosing one, and a page refresh reset the choice every time.
+  // Fetches the real, previously-persisted selection from the server on mount, and only trusts it once
+  // it's confirmed to still be present in a fresh listSpreadsheets() result (selectionUnavailable below)
+  // -- never silently falling back to a different spreadsheet when it isn't.
+  const [persistedSelection, setPersistedSelection] = React.useState<{ id: string; name: string } | null>(null);
+  const [loadingSelection, setLoadingSelection] = React.useState(false);
+  const [selectionUnavailable, setSelectionUnavailable] = React.useState(false);
+
   async function loadSpreadsheets() {
     setLoadingList(true);
     setListError(null);
@@ -928,7 +940,6 @@ function GoogleSheetsTool() {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Could not list spreadsheets.");
       setSpreadsheets(body.spreadsheets);
-      if (body.spreadsheets[0]) setSpreadsheetId(body.spreadsheets[0].id);
     } catch (err) {
       setListError(err instanceof Error ? err.message : "Could not list spreadsheets.");
     } finally {
@@ -939,6 +950,37 @@ function GoogleSheetsTool() {
   React.useEffect(() => {
     loadSpreadsheets();
   }, []);
+
+  React.useEffect(() => {
+    (async () => {
+      setLoadingSelection(true);
+      try {
+        const res = await fetch("/api/integrations/google-sheets/values");
+        const body = await res.json();
+        if (res.ok && body.selected) setPersistedSelection(body.selected);
+      } catch {
+        // Non-fatal -- the read selector below still lets the user choose explicitly.
+      } finally {
+        setLoadingSelection(false);
+      }
+    })();
+  }, []);
+
+  // Reconciles the persisted selection against a REAL, fresh spreadsheet list -- only once both have
+  // loaded. Never trusts the persisted id blindly: if it's genuinely still in the user's Drive, that's
+  // the explicit selection to restore; if it's gone (deleted, unshared, access revoked), this surfaces a
+  // clear "reselect" state instead of silently defaulting to spreadsheets[0] or any other spreadsheet.
+  React.useEffect(() => {
+    if (!spreadsheets || loadingSelection) return;
+    if (!persistedSelection) return;
+    const stillAvailable = spreadsheets.some((s) => s.id === persistedSelection.id);
+    if (stillAvailable) {
+      setSpreadsheetId(persistedSelection.id);
+      setSelectionUnavailable(false);
+    } else {
+      setSelectionUnavailable(true);
+    }
+  }, [spreadsheets, persistedSelection, loadingSelection]);
 
   async function readValues(e: React.FormEvent) {
     e.preventDefault();
@@ -977,6 +1019,13 @@ function GoogleSheetsTool() {
           <AlertTriangle className="h-3.5 w-3.5" /> {listError}
         </p>
       ) : null}
+      {selectionUnavailable ? (
+        <p className="flex items-center gap-1.5 text-xs text-destructive">
+          <AlertTriangle className="h-3.5 w-3.5" /> Your previously selected spreadsheet
+          {persistedSelection?.name ? ` ("${persistedSelection.name}")` : ""} is no longer accessible in your connected Google
+          account -- choose a spreadsheet below.
+        </p>
+      ) : null}
       <form onSubmit={readValues} className="space-y-2">
         <select
           className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
@@ -986,6 +1035,7 @@ function GoogleSheetsTool() {
           aria-label="Spreadsheet"
         >
           {!spreadsheets?.length ? <option value="">{loadingList ? "Loading spreadsheets…" : "No spreadsheets found"}</option> : null}
+          <option value="">Choose a spreadsheet…</option>
           {spreadsheets?.map((s) => (
             <option key={s.id} value={s.id}>
               {s.name}
