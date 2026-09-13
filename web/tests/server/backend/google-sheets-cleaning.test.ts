@@ -215,7 +215,7 @@ describe("processSelectedGoogleSheet -- server-side deterministic cleaning of a 
 
     // 2500 genuinely-below-1000 records -- none of them dropped, none miscounted.
     expect(result.reply).toContain("Records with organic traffic BELOW 1,000 (retained");
-    expect(result.reply).toMatch(/BELOW 1,000 \(retained, routed to "Client Websites" if approved\): 2500\./);
+    expect(result.reply).toMatch(/BELOW 1,000 \(retained, routed to "Client Sheet" if approved\): 2500\./);
     // K/M formatting rule stated explicitly and deterministically (not "ask the model to guess").
     expect(result.reply).toContain('1,000-999,999 shown as K (e.g. "2.5K")');
     expect(result.reply).toContain('1,000,000+ shown as M (e.g. "1.2M")');
