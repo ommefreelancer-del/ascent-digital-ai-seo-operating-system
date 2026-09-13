@@ -39,7 +39,7 @@ import {
 import { buildXlsxWorkbook } from "./xlsx-writer";
 import { createPendingCleaningApproval, type CleaningApprovalRecord } from "./spreadsheet-cleaning-approval";
 import { saveCleaningArtifacts } from "./spreadsheet-cleaning-artifacts";
-import { buildSpreadsheetCleaningApprovalMeta, type SpreadsheetProcessingResult } from "./spreadsheet-processing";
+import { buildSpreadsheetCleaningApprovalMeta, type SpreadsheetProcessingResult } from "./spreadsheet-cleaning-approval-meta";
 
 /**
  * Ceiling for THIS server-side path only -- deliberately much higher than
