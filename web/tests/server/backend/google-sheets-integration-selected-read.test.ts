@@ -10,6 +10,15 @@
 // without needing to already know its exact tab name), and embeds the REAL returned rows directly in the
 // context -- never inventing a new data path, never asking the user to paste anything.
 //
+// BATCH READ FIX (2026-09-14): a real, live-confirmed follow-on defect -- a single bounded read
+// ("A1:Z1000") silently missed rows past its own upper bound, and this file's context builder separately
+// capped its own DISPLAYED rows at 200 regardless of how many were actually read -- so a genuinely
+// 1000+-row sheet ("Health Master Sheet"'s Sheet1) was never seen completely by the agent. Proves
+// getAllSpreadsheetValues()'s real, successive, row-bounded batching (500 rows/call) reads a 1000+ row
+// sheet completely, that ALL of it (not a smaller display-only subset) reaches the agent's context, and
+// that a genuine safety-ceiling case is still reported honestly rather than silently presented as
+// "complete."
+//
 // Same mocking convention as tests/server/google-sheets.test.ts (this session's own established,
 // HEAD-compatible pattern): `db` is mocked with a plaintext-token connection fixture, `fetch` is stubbed
 // for Google's own HTTP endpoints -- zero real network calls, zero live Google Drive/Sheets calls, zero
@@ -45,8 +54,15 @@ const VALID_CONNECTION = {
 
 const CONNECTION_NO_SELECTION = { ...VALID_CONNECTION, metadataJson: null };
 
-/** Routes a stubbed fetch to a Drive files.list response or a Sheets values.get response, matching whichever real endpoint each real call actually hits -- never a single blanket mock that can't tell them apart. */
-function routedFetchMock(driveFiles: Array<{ id: string; name: string }>, sheetsValues: string[][] | null, sheetsOk = true) {
+/**
+ * Routes a stubbed fetch to a Drive files.list response or a Sheets values.get response, matching
+ * whichever real endpoint each real call actually hits -- never a single blanket mock that can't tell
+ * them apart. For Sheets, a REAL row-bounded slice of `allSheetsRows` is returned for whatever row range
+ * the real batching logic actually requested (parsed from the real request URL) -- exactly how the real
+ * Sheets API behaves (a batch naturally returns fewer rows than requested once it runs past the sheet's
+ * real data), so getAllSpreadsheetValues()'s real stopping logic is genuinely exercised, never faked.
+ */
+function routedFetchMock(driveFiles: Array<{ id: string; name: string }>, allSheetsRows: string[][] | null, sheetsOk = true) {
   return vi.fn().mockImplementation(async (url: string) => {
     if (url.includes("googleapis.com/drive/v3/files")) {
       return { ok: true, text: async () => JSON.stringify({ files: driveFiles }) };
@@ -55,7 +71,12 @@ function routedFetchMock(driveFiles: Array<{ id: string; name: string }>, sheets
       if (!sheetsOk) {
         return { ok: false, status: 403, statusText: "Forbidden", text: async () => '{"error":{"message":"The caller does not have permission"}}' };
       }
-      return { ok: true, text: async () => JSON.stringify({ range: "Sheet1!A1:Z1000", majorDimension: "ROWS", values: sheetsValues ?? [] }) };
+      const match = url.match(/values\/A(\d+)%3AZ(\d+)/);
+      const startRow = match ? parseInt(match[1]!, 10) : 1;
+      const endRow = match ? parseInt(match[2]!, 10) : Number.MAX_SAFE_INTEGER;
+      const rows = allSheetsRows ?? [];
+      const slice = rows.slice(startRow - 1, endRow);
+      return { ok: true, text: async () => JSON.stringify({ range: `Sheet1!A${startRow}:Z${endRow}`, majorDimension: "ROWS", values: slice }) };
     }
     throw new Error(`Unexpected fetch URL in test: ${url}`);
   });
@@ -112,7 +133,7 @@ describe("buildGoogleSheetsContext -- reads the persisted selected spreadsheet's
     const sheetsCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes("sheets.googleapis.com"));
     expect(sheetsCall).toBeDefined();
     const sheetsUrl = sheetsCall![0] as string;
-    expect(sheetsUrl).toContain("/values/A1%3AZ1000");
+    expect(sheetsUrl).toContain("/values/A1%3AZ500");
     expect(sheetsUrl).not.toMatch(/values\/Sheet1/);
   });
 
@@ -165,20 +186,54 @@ describe("buildGoogleSheetsContext -- reads the persisted selected spreadsheet's
     expect(context).toContain("do not guess at row contents or claim the read succeeded");
   });
 
-  it("TRUNCATION: more than 200 real rows are truncated for the prompt, honestly labeled, never silently dropped without saying so", async () => {
+  it("REPRODUCES + FIXES THE 1000+ ROW DEFECT: a genuinely 1000+ row Sheet1 (e.g. Health Master Sheet) is read COMPLETELY across multiple real batches, with every row reaching the agent -- never truncated at 200", async () => {
     findUniqueMock.mockResolvedValue(VALID_CONNECTION);
-    const manyRows = Array.from({ length: 250 }, (_, i) => [`row-${i}`]);
-    const fetchMock = routedFetchMock([{ id: "health-master-id", name: "Health Master Sheet" }], manyRows);
+    // 1200 real rows, including a HEADER row repeated verbatim later in the data (row 601) -- proves
+    // batching/accumulation never deduplicates or otherwise mishandles repeated content across a batch
+    // boundary (500-row batches put this repeat inside the SECOND batch).
+    const header = ["URL", "Status", "Last Checked"];
+    const rows = [header];
+    for (let i = 1; i < 1200; i++) {
+      rows.push(i === 600 ? header : [`https://example.com/${i}`, "OK", "2026-09-10"]);
+    }
+    const fetchMock = routedFetchMock([{ id: "health-master-id", name: "Health Master Sheet" }], rows);
     vi.stubGlobal("fetch", fetchMock);
 
     const { buildGoogleSheetsContext } = await import("../../../src/server/backend/google-sheets-integration");
     const context = await buildGoogleSheetsContext("user-1");
 
-    expect(context).toContain("returned 250 row(s)");
-    expect(context).toContain("...and 50 more row(s) not shown here");
-    expect(context).toContain("row-0");
-    expect(context).toContain("row-199");
-    expect(context).not.toContain("row-200");
+    // 3 real batches: rows 1-500, 501-1000, 1001-1200 (the third, short batch is the real signal that
+    // the true end of data was reached -- confirmed below via "complete sheet", never the safety ceiling).
+    const sheetsCalls = fetchMock.mock.calls.filter((c) => (c[0] as string).includes("sheets.googleapis.com"));
+    expect(sheetsCalls).toHaveLength(3);
+    expect(context).toContain("3 real spreadsheets.values.get call(s)");
+    expect(context).toContain("returned 1200 row(s) total");
+    expect(context).toContain("Row 1: URL | Status | Last Checked");
+    expect(context).toContain("Row 601: URL | Status | Last Checked"); // the repeated header row, verbatim, not deduplicated
+    expect(context).toContain("Row 1200: https://example.com/1199 | OK | 2026-09-10"); // the real LAST row -- proves nothing was cut off
+    expect(context).toContain("This is the complete sheet -- reading stopped because a real batch returned fewer rows than requested");
+    expect(context).not.toContain("not shown here");
+    expect(context).not.toContain("safety limit");
+  });
+
+  it("SAFETY CEILING: a genuinely pathological sheet that never returns a short batch is honestly reported as capped, never silently presented as the complete sheet", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    // Every batch returns a FULL 500 rows forever (simulates a sheet far larger than any real ADASOS use
+    // case, or a misbehaving response) -- the real MAX_TOTAL_ROWS ceiling (5000) must still stop this
+    // deterministically, and the result must say so honestly rather than imply completeness.
+    const endlessRows = Array.from({ length: 100_000 }, (_, i) => [`row-${i}`]);
+    const fetchMock = routedFetchMock([{ id: "health-master-id", name: "Health Master Sheet" }], endlessRows);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { buildGoogleSheetsContext } = await import("../../../src/server/backend/google-sheets-integration");
+    const context = await buildGoogleSheetsContext("user-1");
+
+    const sheetsCalls = fetchMock.mock.calls.filter((c) => (c[0] as string).includes("sheets.googleapis.com"));
+    expect(sheetsCalls.length).toBeLessThanOrEqual(10); // bounded, never unbounded real API calls
+    expect(context).toContain("returned 5000 row(s) total");
+    expect(context).toMatch(/real safety limit \(5000 rows\)/);
+    expect(context).toContain("this sheet may genuinely have more rows beyond what's shown");
+    expect(context).not.toContain("This is the complete sheet");
   });
 
   it("PRESERVES THE HUMAN-APPROVAL RULE: the context explicitly states this is read-only and any write still needs the existing approval flow", async () => {

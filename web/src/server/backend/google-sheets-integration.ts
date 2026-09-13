@@ -36,7 +36,7 @@
 // uses. There is no query path here that can return another account's
 // connection or spreadsheet list.
 
-import { getConnectionStatus, listSpreadsheets, getSelectedSpreadsheet, getSpreadsheetValues, type SpreadsheetFile } from "@/server/google-sheets";
+import { getConnectionStatus, listSpreadsheets, getSelectedSpreadsheet, getAllSpreadsheetValues, type SpreadsheetFile, type AllSpreadsheetValuesResult } from "@/server/google-sheets";
 
 const MAX_LISTED_SPREADSHEETS = 10;
 
@@ -45,30 +45,34 @@ const MAX_LISTED_SPREADSHEETS = 10;
 // that "to read actual values, the user must specify a spreadsheet and a range" (see the removed line
 // below). The agent correctly followed that instruction and asked the user to paste/attach Sheet1's row
 // data, even though ADASOS already has a live, authenticated Drive/Sheets connection and a persisted
-// selection for exactly this spreadsheet -- there was never a real reason to ask. A bare range with no
-// sheet-name prefix (e.g. "A1:Z1000") is the Sheets API's own documented way to read a spreadsheet's
-// FIRST sheet (typically "Sheet1") without needing to know its exact tab name first -- the SAME real,
-// already-tested pattern integration-health-check.ts's checkGoogleSheets() already uses (there with
-// "A1:A1" as a minimal liveness probe; here with a generous-but-bounded range for real analysis).
-/** Bare range (no sheet name) -- Sheets API reads the first sheet automatically. Bounded to a generous but finite window so a very large spreadsheet never produces an unbounded read or an unbounded prompt. */
-const SELECTED_SHEET_READ_RANGE = "A1:Z1000";
-/** How many of the real returned rows are embedded verbatim in the context text -- the API read itself is NOT limited to this; only what's shown to the agent is, matching MAX_LISTED_SPREADSHEETS' own truncate-and-say-so convention below. */
-const MAX_CONTEXT_ROWS = 200;
+// selection for exactly this spreadsheet -- there was never a real reason to ask.
+//
+// BATCH READ FIX (2026-09-14): a real, live-confirmed follow-on defect -- a bounded single-call read
+// (previously "A1:Z1000") silently missed any row past its own upper bound, and this file separately
+// capped its own DISPLAYED rows at 200 regardless -- so a genuinely 1000+-row sheet ("Health Master
+// Sheet"'s Sheet1) was never seen completely by the agent, with no indication anything was missing.
+// Now uses google-sheets.ts's real getAllSpreadsheetValues() -- real, successive, row-bounded batches
+// (calling the SAME already-existing getSpreadsheetValues() repeatedly, never a new/independent read
+// path) against the spreadsheet's first sheet (bare range, no sheet-name prefix needed), continuing
+// until the real end of data or a real, honestly-reported safety ceiling. Every row that function
+// returns is shown here -- no separate, smaller display-only truncation on top of it.
+function formatSelectedSpreadsheetRows(name: string, result: AllSpreadsheetValuesResult): string {
+  const { values: rows, rowsRead, batchesRead, cappedAtSafetyLimit } = result;
 
-function formatSelectedSpreadsheetRows(name: string, range: string, rows: readonly (readonly string[])[]): string {
-  if (rows.length === 0) {
+  if (rowsRead === 0) {
     return (
-      `A real spreadsheets.values.get call read ${range} from "${name}" (its first sheet) and found zero rows -- ` +
-      "the sheet is genuinely empty in that range. State this honestly; do not invent placeholder rows."
+      `A real spreadsheets.values.get call read "${name}" (its first sheet) and found zero rows -- ` +
+      "the sheet is genuinely empty. State this honestly; do not invent placeholder rows."
     );
   }
 
-  const shown = rows.slice(0, MAX_CONTEXT_ROWS);
-  const lines = shown.map((row, i) => `  Row ${i + 1}: ${row.map((cell) => cell ?? "").join(" | ")}`);
+  const lines = rows.map((row, i) => `  Row ${i + 1}: ${row.map((cell) => cell ?? "").join(" | ")}`);
   return [
-    `A real spreadsheets.values.get call read ${range} from "${name}" (its first sheet) and returned ${rows.length} row(s). Real row data (pipe-separated columns, verbatim):`,
+    `${batchesRead} real spreadsheets.values.get call(s) read "${name}" (its first sheet) in batches and returned ${rowsRead} row(s) total. Real row data (pipe-separated columns, verbatim, ALL rows, never truncated to a smaller display limit):`,
     ...lines,
-    rows.length > MAX_CONTEXT_ROWS ? `  ...and ${rows.length - MAX_CONTEXT_ROWS} more row(s) not shown here (still real, just truncated for length).` : "",
+    cappedAtSafetyLimit
+      ? `  [Reading stopped at a real safety limit (${rowsRead} rows) rather than a confirmed end of data -- this sheet may genuinely have more rows beyond what's shown. State this honestly if asked whether this is the complete sheet.]`
+      : `  [This is the complete sheet -- reading stopped because a real batch returned fewer rows than requested, confirming the true end of data.]`,
     "Use this real data directly to analyze the spreadsheet. Never invent additional rows, columns, or values beyond what's shown here. This is a READ ONLY result -- any write/update/delete back to this spreadsheet still requires the existing explicit human-approval flow; never claim a write happened from this context alone.",
   ]
     .filter(Boolean)
@@ -135,8 +139,8 @@ export async function buildGoogleSheetsContext(userId: string): Promise<string> 
   let selectedRowsBlock: string | null = null;
   if (selected) {
     try {
-      const result = await getSpreadsheetValues(userId, selected.id, SELECTED_SHEET_READ_RANGE);
-      selectedRowsBlock = formatSelectedSpreadsheetRows(selected.name, SELECTED_SHEET_READ_RANGE, result.values);
+      const result = await getAllSpreadsheetValues(userId, selected.id);
+      selectedRowsBlock = formatSelectedSpreadsheetRows(selected.name, result);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "an unknown error";
       selectedRowsBlock =

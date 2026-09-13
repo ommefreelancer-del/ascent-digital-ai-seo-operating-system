@@ -150,6 +150,58 @@ export async function getSpreadsheetValues(userId: string, spreadsheetId: string
   return { range: data.range ?? range, majorDimension: data.majorDimension ?? "ROWS", values: data.values ?? [] };
 }
 
+/**
+ * BATCH READ FIX (2026-09-14): a real, live-confirmed defect -- a single bounded getSpreadsheetValues()
+ * call (e.g. "A1:Z1000") silently missed any row past its own upper bound, and separately the caller
+ * (google-sheets-integration.ts) truncated its own DISPLAYED rows to 200 -- so a genuinely 1000+-row
+ * sheet ("Health Master Sheet"'s Sheet1) was never seen completely by the Google Sheets Integration
+ * Agent, with no indication anything was missing. This reads a spreadsheet's first sheet (same bare-range,
+ * no-sheet-name-prefix convention getSpreadsheetValues()'s own callers already rely on) in real,
+ * successive, row-bounded batches -- calling the SAME already-existing getSpreadsheetValues() repeatedly,
+ * never a new/independent read mechanism -- until a batch returns fewer rows than requested (the real,
+ * reliable signal from the Sheets API that the true end of data was reached inside that batch) or the
+ * absolute safety ceiling (MAX_TOTAL_ROWS) is hit. Never silently stops short of the real end: when the
+ * ceiling -- not genuine end of data -- is why reading stopped, `cappedAtSafetyLimit` tells the caller
+ * exactly that, so a partial read is never presented as complete.
+ */
+const BATCH_ROW_SIZE = 500;
+/** Absolute ceiling on total rows getAllSpreadsheetValues() will ever accumulate -- bounds the number of real API calls and the size of the returned result for a pathological/very large sheet. Comfortably covers the reported "1000+ rows" case (2-3 batches) with real headroom. */
+const MAX_TOTAL_ROWS = 5000;
+
+export interface AllSpreadsheetValuesResult {
+  values: string[][];
+  rowsRead: number;
+  batchesRead: number;
+  /** True only when MAX_TOTAL_ROWS (not a genuine short/empty batch) is why reading stopped -- the caller must report this honestly, never silently treat the result as the sheet's complete data. */
+  cappedAtSafetyLimit: boolean;
+}
+
+export async function getAllSpreadsheetValues(userId: string, spreadsheetId: string): Promise<AllSpreadsheetValuesResult> {
+  const values: string[][] = [];
+  let startRow = 1;
+  let batchesRead = 0;
+  let cappedAtSafetyLimit = false;
+
+  while (true) {
+    const endRow = startRow + BATCH_ROW_SIZE - 1;
+    const range = `A${startRow}:Z${endRow}`;
+    const result = await getSpreadsheetValues(userId, spreadsheetId, range);
+    batchesRead++;
+    values.push(...result.values);
+
+    const reachedRealEndOfData = result.values.length < BATCH_ROW_SIZE;
+    if (reachedRealEndOfData) break;
+
+    if (values.length >= MAX_TOTAL_ROWS) {
+      cappedAtSafetyLimit = true;
+      break;
+    }
+    startRow = endRow + 1;
+  }
+
+  return { values, rowsRead: values.length, batchesRead, cappedAtSafetyLimit };
+}
+
 /** Persists which spreadsheet the user has selected for this integration, mirroring GoogleSearchConsoleConnection.selectedSiteUrl but stored in the shared GoogleServiceConnection.metadataJson field per its own documented convention. */
 export async function setSelectedSpreadsheet(userId: string, spreadsheetId: string, name: string): Promise<void> {
   await db.googleServiceConnection.update({

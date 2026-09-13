@@ -218,3 +218,123 @@ describe("getSpreadsheetValues", () => {
     );
   });
 });
+
+// BATCH READ FIX (2026-09-14): real regression coverage for the confirmed production defect --
+// getSpreadsheetValues() alone only ever reads ONE bounded range in ONE call, so any caller using a
+// single fixed range (e.g. the old "A1:Z1000") silently missed every row past that bound. A real
+// "Health Master Sheet" Sheet1 with 1000+ rows was never read completely. getAllSpreadsheetValues()
+// closes this by calling the SAME already-existing getSpreadsheetValues() repeatedly, in real
+// successive row-bounded batches, until a batch genuinely returns fewer rows than requested (the real
+// signal the Sheets API gives when a range's true data ends before the range's own upper bound) or a
+// real, honestly-reported safety ceiling is hit.
+describe("getAllSpreadsheetValues", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    findUniqueMock.mockReset();
+    updateMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Simulates the real Sheets API: returns exactly the requested row-bounded slice of `allRows`, which naturally comes back shorter than the batch size once the slice runs past the real data -- the same real signal getAllSpreadsheetValues() relies on to know it has reached the true end. */
+  function batchedFetchMock(allRows: string[][]) {
+    return vi.fn().mockImplementation(async (url: string) => {
+      const match = (url as string).match(/values\/A(\d+)%3AZ(\d+)/);
+      const startRow = match ? parseInt(match[1]!, 10) : 1;
+      const endRow = match ? parseInt(match[2]!, 10) : Number.MAX_SAFE_INTEGER;
+      const slice = allRows.slice(startRow - 1, endRow);
+      return { ok: true, text: async () => JSON.stringify({ range: `Sheet1!A${startRow}:Z${endRow}`, majorDimension: "ROWS", values: slice }) };
+    });
+  }
+
+  it("reads a 1000+ row sheet COMPLETELY across multiple real batches -- proves the exact reported defect (1000+ rows, only 200 ever returned) is fixed", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const header = ["URL", "Status"];
+    const rows = [header];
+    for (let i = 1; i < 1200; i++) {
+      rows.push(i === 600 ? header : [`row-${i}`, "OK"]);
+    }
+    const fetchMock = batchedFetchMock(rows);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getAllSpreadsheetValues } = await import("../../src/server/google-sheets");
+    const result = await getAllSpreadsheetValues("user-1", "sheet-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(3); // 500 + 500 + 200 -- the real, short final batch is the stop signal
+    expect(result.rowsRead).toBe(1200);
+    expect(result.batchesRead).toBe(3);
+    expect(result.cappedAtSafetyLimit).toBe(false);
+    expect(result.values[0]).toEqual(header);
+    expect(result.values[600]).toEqual(header); // the repeated header at row 601 (0-indexed 600), verbatim -- never deduplicated
+    expect(result.values[1199]).toEqual(["row-1199", "OK"]); // the real last row -- proves nothing was cut off
+  });
+
+  it("a small sheet (well under one batch) still reads correctly in a single call", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const fetchMock = batchedFetchMock([["a"], ["b"], ["c"]]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getAllSpreadsheetValues } = await import("../../src/server/google-sheets");
+    const result = await getAllSpreadsheetValues("user-1", "sheet-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.rowsRead).toBe(3);
+    expect(result.batchesRead).toBe(1);
+    expect(result.cappedAtSafetyLimit).toBe(false);
+  });
+
+  it("an exact multiple of the batch size still terminates (the following batch legitimately returns zero rows, not an infinite loop)", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const rows = Array.from({ length: 500 }, (_, i) => [`row-${i}`]); // exactly one batch's worth
+    const fetchMock = batchedFetchMock(rows);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getAllSpreadsheetValues } = await import("../../src/server/google-sheets");
+    const result = await getAllSpreadsheetValues("user-1", "sheet-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2); // the full batch, then a real 0-row batch confirming the end
+    expect(result.rowsRead).toBe(500);
+    expect(result.cappedAtSafetyLimit).toBe(false);
+  });
+
+  it("SAFETY CEILING: a sheet that never returns a short batch is still bounded to a deterministic number of real API calls, and honestly reports it was capped", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const endlessRows = Array.from({ length: 1_000_000 }, (_, i) => [`row-${i}`]);
+    const fetchMock = batchedFetchMock(endlessRows);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getAllSpreadsheetValues } = await import("../../src/server/google-sheets");
+    const result = await getAllSpreadsheetValues("user-1", "sheet-1");
+
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(10);
+    expect(result.rowsRead).toBe(5000);
+    expect(result.cappedAtSafetyLimit).toBe(true);
+  });
+
+  it("an empty sheet (zero rows) is reported honestly, real single call, never capped", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    const fetchMock = batchedFetchMock([]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getAllSpreadsheetValues } = await import("../../src/server/google-sheets");
+    const result = await getAllSpreadsheetValues("user-1", "sheet-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.rowsRead).toBe(0);
+    expect(result.values).toEqual([]);
+    expect(result.cappedAtSafetyLimit).toBe(false);
+  });
+
+  it("propagates a real upstream failure honestly -- never silently returns a partial/empty result on a genuine API error", async () => {
+    findUniqueMock.mockResolvedValue(VALID_CONNECTION);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 403, statusText: "Forbidden", text: async () => '{"error":{"message":"insufficient permission"}}' }),
+    );
+
+    const { getAllSpreadsheetValues } = await import("../../src/server/google-sheets");
+    await expect(getAllSpreadsheetValues("user-1", "sheet-1")).rejects.toThrow(/Sheets spreadsheets\.values\.get failed: 403 Forbidden.*insufficient permission/);
+  });
+});
