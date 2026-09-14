@@ -22,7 +22,7 @@
 import { getServerAuthSession } from "@/server/auth";
 import { approveCleaningApproval, rejectCleaningApproval, getCleaningApprovalById } from "./spreadsheet-cleaning-approval";
 import { getWriteDestinationSpreadsheet } from "@/server/google-sheets";
-import { writeApprovedCleaningToGoogleSheets } from "./spreadsheet-google-sheets-writeback";
+import { writeApprovedCleaningRespectingMode } from "./spreadsheet-existing-output-cleanup";
 import { logActivity } from "@/server/log-activity";
 
 export interface CleaningDecisionActionState {
@@ -55,7 +55,22 @@ export async function approveCleaningApprovalAction(approvalId: string, _prevSta
     };
   }
 
-  const writeResult = await writeApprovedCleaningToGoogleSheets(userId, approved.record, selected.id);
+  const dispatch = await writeApprovedCleaningRespectingMode(userId, approved.record, selected.id);
+  if (dispatch.mode === "existing-tab-replace") {
+    const writeResult = dispatch.result;
+    if (!writeResult.ok) {
+      await logActivity(userId, "workspace", `Approved a tab self-dedup cleanup, but the write to Google Sheets failed: ${writeResult.error}`);
+      return { ok: true, status: "write_failed", message: `Approved, but the write to Google Sheets failed: ${writeResult.error} You can retry once this is fixed.` };
+    }
+    await logActivity(userId, "workspace", `Cleared and rewrote "${writeResult.tabName}" in "${selected.name}" with ${writeResult.rowsWritten} de-duplicated record(s).`);
+    return {
+      ok: true,
+      status: "written",
+      message: `"${writeResult.tabName}" in "${selected.name}" was cleared and rewritten with ${writeResult.rowsWritten} de-duplicated record(s).`,
+    };
+  }
+
+  const writeResult = dispatch.result;
   if (!writeResult.ok) {
     await logActivity(userId, "workspace", `Approved a spreadsheet-cleaning result, but the write to Google Sheets failed: ${writeResult.error}`);
     return { ok: true, status: "write_failed", message: `Approved, but the write to Google Sheets failed: ${writeResult.error} You can retry once this is fixed.` };
@@ -118,7 +133,22 @@ export async function retryWriteToGoogleSheetsAction(approvalId: string, _prevSt
     };
   }
 
-  const writeResult = await writeApprovedCleaningToGoogleSheets(userId, approval, selected.id);
+  const dispatch = await writeApprovedCleaningRespectingMode(userId, approval, selected.id);
+  if (dispatch.mode === "existing-tab-replace") {
+    const writeResult = dispatch.result;
+    if (!writeResult.ok) {
+      await logActivity(userId, "workspace", `Retried the Google Sheets clear-and-replace write -- still failed: ${writeResult.error}`);
+      return { ok: true, status: "write_failed", message: `Retry failed: ${writeResult.error} You can retry again once this is fixed.` };
+    }
+    await logActivity(userId, "workspace", `Retried and completed the clear-and-replace write for "${writeResult.tabName}" in "${selected.name}" (${writeResult.rowsWritten} de-duplicated record(s)).`);
+    return {
+      ok: true,
+      status: "written",
+      message: `"${writeResult.tabName}" in "${selected.name}" was cleared and rewritten with ${writeResult.rowsWritten} de-duplicated record(s).`,
+    };
+  }
+
+  const writeResult = dispatch.result;
   if (!writeResult.ok) {
     await logActivity(userId, "workspace", `Retried the Google Sheets write for a spreadsheet-cleaning result -- still failed: ${writeResult.error}`);
     return { ok: true, status: "write_failed", message: `Retry failed: ${writeResult.error} You can retry again once this is fixed.` };

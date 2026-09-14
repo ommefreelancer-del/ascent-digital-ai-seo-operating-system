@@ -39,9 +39,19 @@ model User {
   contentDrafts  ContentDraft[]
   activities     ActivityEvent[]
   googleSearchConsoleConnection GoogleSearchConsoleConnection?
+  bingWebmasterConnection BingWebmasterConnection?
+  bingOAuthStates BingOAuthState[]
   googleServiceConnections GoogleServiceConnection[]
   prospects Prospect[]
   wordPressConnection WordPressConnection?
+  gitHubConnection GitHubConnection?
+  remediationExecutions RemediationExecutionRecord[]
+  remediationApprovals RemediationApproval[]
+  campaignRecords CampaignRecord[]
+  webDevelopmentChanges WebDevelopmentChange[]
+  deliverables Deliverable[]
+  attachments Attachment[]
+  spreadsheetCleaningApprovals SpreadsheetCleaningApproval[]
 }
 
 model PasswordResetToken {
@@ -148,8 +158,98 @@ model ChatMessage {
   metaJson  String?  // JSON: { routingDecision, escalations } for assistant messages, for the Task Progress / Execution Log detail view
   createdAt DateTime @default(now())
 
+  // WORKSPACE FILE ATTACHMENT CAPABILITY: set only on the user turn a real, already-uploaded Attachment
+  // was explicitly attached to -- never set on an assistant turn. onDelete: SetNull so removing an
+  // Attachment (which never happens once linked -- see attachments.ts's own header) would never cascade
+  // into deleting real chat history.
+  attachmentId String?
+  attachment   Attachment? @relation(fields: [attachmentId], references: [id], onDelete: SetNull)
+
   @@index([sessionId])
   @@index([createdAt])
+}
+
+// WORKSPACE FILE ATTACHMENT CAPABILITY: a real file the user explicitly uploaded and attached to one
+// Workspace task -- mirrors Deliverable's own private-storage convention (server-side storagePath
+// outside `public/`, retrieval only through an authenticated, ownership-checked download route, never a
+// static file URL or the user-supplied filename used as the on-disk name) rather than inventing a
+// second file-storage mechanism. The original upload is NEVER overwritten or mutated once written --
+// `storagePath` always points at the exact original bytes the user sent.
+model Attachment {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // The user's own original filename -- display/context only, NEVER used to derive the on-disk path
+  // (path-traversal safety; see attachments.ts's own storage function).
+  originalFileName String
+  // Normalized, allowlisted kind derived from the real file's extension -- "xlsx" | "xls" | "csv" |
+  // "pdf" | "docx". Never any other value; an unsupported upload is rejected before a row is created.
+  fileType         String
+  mimeType         String
+  sizeBytes        Int
+
+  // Relative path (this row's own id + extension) under the server's own private storage root.
+  storagePath String
+
+  createdAt DateTime @default(now())
+
+  messages ChatMessage[]
+  cleaningApprovals SpreadsheetCleaningApproval[]
+
+  @@index([userId, createdAt])
+}
+
+// SPREADSHEET CLEANING CAPABILITY (2026-09-02): a real, human-approval gate between a locally-computed
+// spreadsheet-cleaning result and any write to the user's own Google Sheets -- mirrors
+// RemediationApproval's own established shape (workspace-scoped, a real status lifecycle, decided at
+// most once) rather than a bespoke ad hoc flag, but is its own dedicated model because
+// RemediationApproval's fields (connectionId/findingId/repositoryFullName) are GitHub-remediation
+// specific and would have to be awkwardly repurposed to mean something else here. Never written to
+// automatically -- see spreadsheet-cleaning-approval.ts's own header.
+model SpreadsheetCleaningApproval {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  attachmentId String
+  attachment   Attachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+
+  // "pending_approval" | "approved" | "rejected" | "written" | "write_failed"
+  // WRITE-RESULT STATE FIX (2026-09-03): a real, live-confirmed defect -- "approved" used to also mean
+  // "and the Google Sheets write, if attempted, either succeeded, failed, or was never tried" all at once,
+  // so the UI showed the same green "Approved" badge whether or not anything actually reached Google
+  // Sheets. "write_failed" is a genuinely separate, persisted terminal-until-retried state: set only when
+  // a real write attempt threw (see spreadsheet-google-sheets-writeback.ts), never inferred client-side.
+  // "written" is set ONLY after a real, confirmed successful Sheets API response -- never on approval alone.
+  status String @default("pending_approval")
+
+  // The FULL, already-computed CleaningResult (headers, retained rows, every audit category) as JSON --
+  // approval and any eventual write always reuse this exact snapshot, never a re-derived one, so what
+  // gets written is provably identical to what a human actually reviewed and approved.
+  resultJson String
+
+  // REVIEWABLE ARTIFACTS (2026-09-02): real, generated files a human can actually open and inspect
+  // before deciding -- a NEW cleaned XLSX workbook (never the original upload) and a CSV cleaning audit.
+  // Relative filenames under the server's own private storage root (var/spreadsheet-cleaning/), mirroring
+  // Attachment.storagePath's exact convention -- null until generated (never before this row exists, so
+  // the on-disk name can be derived from this row's own id).
+  cleanedFileStoragePath String?
+  auditFileStoragePath   String?
+
+  // PER-TAB WRITE TRACKING (2026-09-03): real retry-safety -- the write-back sends Admin/Vendor and
+  // Client Websites as two SEPARATE Sheets API calls; if the first succeeds and the second throws, a
+  // naive retry would re-append the first tab's rows a second time (spreadsheets.values.append always
+  // appends, it is not idempotent on its own). Each timestamp is set immediately after ITS OWN real,
+  // confirmed successful append -- null means "not yet written by any attempt" -- so a retry only
+  // re-sends the tab(s) that genuinely never succeeded, and a fully-successful tab is never resent.
+  adminVendorWrittenAt    DateTime?
+  clientWebsitesWrittenAt DateTime?
+
+  createdAt DateTime  @default(now())
+  decidedAt DateTime?
+
+  @@index([userId, status, createdAt])
 }
 
 model Report {
@@ -163,7 +263,68 @@ model Report {
   resultJson String
   createdAt  DateTime @default(now())
 
+  deliverables Deliverable[]
+
   @@index([userId, createdAt])
+}
+
+// DELIVERABLE CREATION CAPABILITY: a real, generated client-facing artifact
+// (PDF today) produced FROM an already-persisted Report -- extends the
+// existing reporting architecture (Report -> Deliverable), never a second,
+// competing reporting system. `userId` is the same real client/workspace
+// isolation boundary as every other model in this schema -- a Deliverable
+// can only ever be created for, or retrieved by, the same workspace that
+// owns its source Report (enforced again at the API layer, not just here).
+// `reportId` is a required, real foreign key -- a Deliverable never exists
+// without a real, persisted source Report to trace back to (Section 7's
+// "deliverables must only be generated from REAL persisted data").
+// `campaignRecordId` is optional (Section 2's "campaign ID where
+// applicable") since not every report traces to a guest-posting/outreach
+// campaign; deleting a CampaignRecord sets this null rather than cascading,
+// since the Deliverable's own PDF content and its source Report remain
+// real and valid on their own even if the campaign link is later removed.
+// `storagePath` is a reference to the real PDF bytes on disk (this
+// project's existing convention for a generated binary asset -- see
+// server/pixabay.ts's downloadAndStoreAsset()) under a path OUTSIDE
+// `public/` (never directly web-servable) -- retrieval must always go
+// through the authenticated, ownership-checked download route, never a
+// static file URL. `status` starts "generating" and only ever becomes
+// "completed" once the real file has actually been written -- a "failed"
+// row is a real, honest record of an unsuccessful attempt, never silently
+// upgraded to look successful (Section 4's "do not report success until
+// the artifact and Deliverable record actually exist").
+model Deliverable {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  reportId String
+  report   Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  campaignRecordId String?
+  campaignRecord   CampaignRecord? @relation(fields: [campaignRecordId], references: [id], onDelete: SetNull)
+
+  // e.g. "client-report" -- the kind of deliverable, distinct from `format`
+  // (the file format it was rendered into) so a future second format for
+  // the same deliverable type is a additive, not a schema change.
+  type   String @default("client-report")
+  format String @default("pdf")
+  // "generating" | "completed" | "failed"
+  status String @default("generating")
+
+  // Relative path under the server's own private storage root (never
+  // `public/`) -- null until status is "completed". The real byte size of
+  // the generated file, for a lightweight non-empty sanity check without
+  // re-reading the file.
+  storagePath String?
+  fileSize    Int?
+  error       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([reportId])
 }
 
 model ContentDraft {
@@ -199,8 +360,12 @@ model GoogleSearchConsoleConnection {
   id              String    @id @default(cuid())
   userId          String    @unique
   user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  accessToken     String
-  refreshToken    String
+  // AES-256-GCM encrypted at rest via server/credential-encryption.ts -- the
+  // same mechanism GitHubConnection.encryptedAccessToken already uses.
+  // Never plaintext; never decrypted anywhere but the one server-side call
+  // site that needs a real bearer token for a Google API request.
+  encryptedAccessToken  String
+  encryptedRefreshToken String
   scope           String
   expiresAt       DateTime
   // Which of the account's sites.list properties to query for this user.
@@ -216,14 +381,68 @@ model GoogleSearchConsoleConnection {
   updatedAt       DateTime  @updatedAt
 }
 
+// CROSS-ORIGIN CALLBACK FIX (2026-08-27): mirrors PasswordResetToken's own
+// shape (opaque single-use token -> userId, with expiry) -- reused here for
+// a genuinely different reason. Bing Webmaster's OAuth Client registration
+// rejects a localhost redirect URI outright, so local development routes
+// the callback through a temporary public HTTPS tunnel (a different browser
+// origin than `localhost`, where the ADASOS session cookie -- and the
+// state's own former CSRF cookie -- are both scoped and therefore never
+// arrive). This table is the server-side link the callback needs instead of
+// a cookie: /connect creates one row (real session present, same-origin)
+// binding a random `state` to the real authenticated userId; /callback
+// resolves the user by looking up that same `state` from the database
+// (immune to which origin the request arrived on), then deletes/expires it
+// (single-use, same discipline as PasswordResetToken.usedAt).
+model BingOAuthState {
+  id        String    @id @default(cuid())
+  state     String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+}
+
+// Bing Webmaster Tools OAuth 2.0 connection (server/bing-webmaster.ts) -- a
+// deliberately separate model from GoogleSearchConsoleConnection, never a
+// shared/merged table: this is a genuinely different provider (Microsoft,
+// not Google), with its own token issuer, its own scope vocabulary
+// (Webmaster.read / Webmaster.manage, not webmasters.readonly), and its own
+// site-verification state. Keeping every provider's connection in its own
+// model is what makes "never merge different provider metrics in a way that
+// makes the source ambiguous" enforceable at the schema level, not just by
+// convention in application code. Same encryption mechanism as every other
+// OAuth connection in this schema (AES-256-GCM via
+// server/credential-encryption.ts) and the same shape as
+// GoogleSearchConsoleConnection (access+refresh token, scope, expiry,
+// selected site) since the two OAuth flows are structurally analogous.
+model BingWebmasterConnection {
+  id                    String   @id @default(cuid())
+  userId                String   @unique
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  encryptedAccessToken  String
+  encryptedRefreshToken String
+  scope                 String
+  expiresAt             DateTime
+  // Which of GetUserSites()'s verified sites to query for this user -- same
+  // "auto-pick the first verified site, re-validated live on every call"
+  // convention as GoogleSearchConsoleConnection.selectedSiteUrl. Null means
+  // "not yet resolved" or "no verified site yet", never "unset by mistake".
+  selectedSiteUrl       String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
 // Generic foundation for Google service connections beyond Search Console
-// (Business Profile, Sheets, Gmail, etc. -- Phase 2). Deliberately separate
-// from GoogleSearchConsoleConnection rather than extending it: that model's
+// (Business Profile, Sheets, Gmail, etc.). Deliberately separate from
+// GoogleSearchConsoleConnection rather than extending it: that model's
 // `userId @unique` is a hard one-to-one constraint that can't hold more than
 // one row per user, and its `selectedSiteUrl` field has no equivalent
-// meaning for non-Search-Console services. This model is not yet used by
-// any code -- no service is wired to it in this change; it exists purely as
-// the shared data-model foundation for the Google integrations that follow.
+// meaning for non-Search-Console services. Now actively used (service
+// values: "sheets", "business_profile", "gmail", "drive", "analytics") --
+// see e.g. server/google-sheets.ts, which stores its OAuth tokens here under
+// service: "sheets".
 model GoogleServiceConnection {
   id           String   @id @default(cuid())
   userId       String
@@ -232,8 +451,10 @@ model GoogleServiceConnection {
   // (user, service) pair, enforced below, so a user can hold independent
   // connections to multiple Google services at once.
   service      String
-  accessToken  String
-  refreshToken String
+  // AES-256-GCM encrypted at rest via server/credential-encryption.ts -- see
+  // GoogleSearchConsoleConnection's matching fields above for the mechanism.
+  encryptedAccessToken  String
+  encryptedRefreshToken String
   scope        String
   expiresAt    DateTime
   // Service-specific selected-resource state (e.g. a chosen Business
@@ -312,14 +533,247 @@ model WordPressConnection {
   provider String @default("self-hosted") // "self-hosted" | "wordpress-com"
   siteUrl  String
   siteName String?
-  // Self-hosted only (Application Passwords / HTTP Basic Auth).
-  username    String?
-  appPassword String?
+  // Self-hosted only (Application Passwords / HTTP Basic Auth). AES-256-GCM
+  // encrypted at rest via server/credential-encryption.ts -- see
+  // GoogleSearchConsoleConnection's matching fields for the mechanism.
+  username             String?
+  encryptedAppPassword String?
   // wordpress-com only (OAuth2 / Bearer). wpcomSiteId is null until the
   // user has picked a site (only ambiguous when they manage more than
   // one) -- see selectWordPressComSite() in server/wordpress.ts.
-  accessToken String?
+  encryptedAccessToken String?
   wpcomSiteId String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+}
+
+// One authorized GitHub repository connection per user -- the real "hands"
+// credential for repository-write remediation (see
+// web/src/server/github.ts's GitHubRepositoryAdapter, which is the only code
+// that ever reads accessToken). `userId @unique` matches WordPressConnection's
+// existing one-connection-per-user convention; a real client-isolation
+// boundary in practice, since every remediation lookup goes through
+// `db.gitHubConnection.findUnique({ where: { userId } })` -- there is no
+// query path that can return another user's row.
+//
+// SCOPE (least privilege, this task's own Section 7): `repositoryFullName`
+// is a single, explicit "owner/repo" this connection is authorized for --
+// the adapter refuses any operation against a different repository, even if
+// the underlying OAuth token happened to carry broader access. accessToken
+// is AES-256-GCM encrypted at rest (see credential-encryption.ts) -- never
+// stored, logged, or echoed in plaintext anywhere.
+model GitHubConnection {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // "github_oauth_app" today -- kept as a real field (not hard-coded
+  // elsewhere) so a future GitHub App/installation-token provider can be
+  // added without a schema change; see github.ts's own header for why an
+  // OAuth App was implemented first.
+  provider String @default("github_oauth_app")
+  // The GitHub login this token authenticates as -- real, fetched from
+  // GitHub's own /user endpoint at connect time, never guessed.
+  accountLogin String
+  // The single repository ("owner/repo") this connection is authorized to
+  // act on -- least privilege; see this model's own header. Nullable
+  // (PRODUCTION HARDENING, 2026-08-15, Section 4): the OAuth token is
+  // persisted as soon as GitHub confirms the account, before any repository
+  // has been chosen -- see github.ts's own savePendingGitHubConnection()/
+  // selectGitHubRepository() for the two-step flow this enables (no more
+  // global GITHUB_TARGET_REPOSITORY env var required for normal onboarding).
+  repositoryFullName String?
+  // AES-256-GCM ciphertext (credential-encryption.ts's encryptSecret()
+  // output) -- never a plaintext token.
+  encryptedAccessToken String
+  // The real OAuth scope string GitHub granted, exactly as returned --
+  // never assumed. Checked before any write operation (see
+  // GitHubRepositoryAdapter.validateAccess()).
+  scope String
+  // "active" | "pending_repository_selection" | "revoked" | "invalid" --
+  // "pending_repository_selection" (PRODUCTION HARDENING, 2026-08-15,
+  // Section 4) means the token is real and stored but no repository has
+  // been chosen yet (repositoryFullName is null); never eligible for
+  // remediation execution in that state -- see
+  // GitHubRepositoryAdapter.validateAccess()'s own "active" check.
+  // "revoked" is set by the user disconnecting (Section 4's original
+  // revocation-support requirement), "invalid" automatically the first time
+  // a real API call proves the token no longer works (expired/revoked
+  // upstream), so eligibility checks never have to re-derive this from a
+  // live call on every request.
+  status String @default("active")
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  lastUsedAt DateTime?
+}
+
+// A structured, auditable record of one real (or attempted) production
+// modification -- this task's own Section 8 requirement: "Do not rely only
+// on conversational text." One row per RemediationOrchestrator.run() that
+// reached actual execution (never created for a task that stopped at
+// BLOCKED/REJECTED before execution -- see remediation.ts's own
+// recordExecution()). `userId` is the same real client-isolation boundary as
+// every other model above.
+model RemediationExecutionRecord {
+  id                 String   @id @default(cuid())
+  remediationTaskId  String
+  userId             String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connectionId       String?
+  provider           String
+  target             String
+  intendedChangesJson String
+  approvalId         String?
+  startedAt          DateTime @default(now())
+  completedAt        DateTime?
+  result             String // "success" | "failed" | "blocked"
+  changedFilesJson   String?
+  commitReference    String?
+  deploymentReference String?
+  verificationReference String?
+  rollbackReference  String?
+  error              String?
+  finalStatus        String
+
+  @@index([userId, remediationTaskId])
+}
+
+// The real, persisted bridge between RemediationOrchestrator.planAndRequestApproval()
+// (frozen backend) and an actual human clicking Approve/Reject in the AI
+// Workspace -- this is what makes the approval gate genuinely interactive
+// instead of a stateless HTTP request auto-resolving itself (see
+// server/backend/approval.ts's own header on why createWebApprovalChannel()
+// alone can never provide real human authorization). One row per pending
+// remediation; never deleted on decision (preserves the audit trail) --
+// `status` moves pending -> approved|rejected|expired, and (once execution
+// runs) -> resolved|failed.
+model RemediationApproval {
+  id     String @id @default(cuid())
+  // Client/workspace isolation boundary -- identical in meaning to every
+  // other userId-scoped model in this schema. An approval can only ever be
+  // decided by the same workspace that created it (see the /approve and
+  // /reject route handlers, which filter by `{ id, workspaceId: session.user.id }`).
+  workspaceId String
+  user        User   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // The RemediationTask.taskId this approval is bound to -- unique, so an
+  // approval can never be replayed against a different remediation task.
+  taskId String @unique
+  // The GitHubConnection.id that was active when this approval was created
+  // -- re-validated for a match at decision time (Section 7's "bound to
+  // ... connectionId" requirement); if the workspace's connection changed
+  // in between, the approval is refused rather than silently executed
+  // against a different repository/credential.
+  connectionId       String
+  findingId          String
+  affectedResource   String
+  repositoryFullName String
+  // The exact real content this remediation would write -- shown to the
+  // user verbatim before they decide; re-used unmodified at execution time,
+  // never re-derived (Section 7's "exact proposed change" requirement).
+  proposedAction String
+  // Full RemediationTask snapshot (JSON) at the moment planAndRequestApproval()
+  // returned it -- pending_approval, approvalState "pending". This is what
+  // resumeAfterApproval() is called with; nothing about it is regenerated
+  // at decision time except the decision itself.
+  taskJson String
+  // "pending" | "approved" | "rejected" | "expired" | "resolved" | "failed"
+  status String @default("pending")
+  // Final RemediationTask snapshot (JSON) after resumeAfterApproval() runs
+  // -- null until a decision has actually been made.
+  resultJson String?
+  createdAt  DateTime  @default(now())
+  // Short validity window (Section 7's "expiration/validity where
+  // appropriate") -- an approval presented long ago may no longer reflect
+  // the real, current state of the site/repository; expired approvals are
+  // refused, not silently honored.
+  expiresAt DateTime
+  decidedAt DateTime?
+
+  @@index([workspaceId, status])
+}
+
+// WEB DEVELOPMENT AGENT GITHUB-ACCESS FIX: the real, persisted human-approval
+// gate for a Web Development Agent website-modification request -- the same
+// "propose -> human decides -> only then commit" shape RemediationApproval
+// already uses, but deliberately a SEPARATE model rather than overloading
+// RemediationApproval, since that model's own taskId/RemediationTask coupling
+// (see its header) is specific to RemediationOrchestrator's Doctor Flow
+// lifecycle and its execute() is hard-scoped to robots.txt/sitemap.xml/
+// canonical-link only (see github.ts's REMEDIATION_OPERATIONS) -- a full-file
+// visual redesign of arbitrary website files is a genuinely different
+// capability, not a remediation finding. `filesJson` carries every proposed
+// file's real, current pre-change content+sha (read live from GitHub) and
+// the real, LLM-drafted new content -- shown to the user before any commit,
+// re-used unmodified at apply time, never re-derived. One row per request;
+// never deleted (audit trail) -- status moves
+// pending_approval -> approved|rejected -> committed|failed.
+model WebDevelopmentChange {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // The GitHubConnection.id active when this change was proposed --
+  // re-validated for a match at apply time, mirroring RemediationApproval's
+  // own connectionId check, so a connection swapped in between is refused
+  // rather than silently committed against a different repository.
+  connectionId       String
+  repositoryFullName String
+  branch             String
+  targetUrl          String
+  // The real user chat message this change was requested from -- verbatim.
+  requestSummary String
+  // JSON array of { path, previousContent, previousSha, newContent } --
+  // every entry real (read from GitHub, drafted by the real code-generation
+  // provider), never fabricated.
+  filesJson String
+  status    String @default("pending_approval")
+  // JSON array of { path, commitSha } -- populated only once status is
+  // "committed".
+  commitShasJson String?
+  error          String?
+  createdAt      DateTime  @default(now())
+  decidedAt      DateTime?
+
+  @@index([userId, status])
+}
+
+// PHASE 3 PERSISTENCE FIX (2026-08-18): the real, persisted record for one
+// Campaign Tracking Agent case. Before this model existed,
+// CampaignTrackingAgent.trackCampaign() (frozen backend,
+// src/agents/campaign-tracking-agent) only ever returned an in-memory
+// CampaignTrackingResult -- nothing survived past the single request/reply
+// that produced it. One row per (userId, campaignName); re-tracking the
+// same campaign (new campaignUpdates, a newer real OutreachResult) updates
+// this SAME row rather than creating a duplicate, so a campaign's current
+// real state is always exactly one query away. `userId` is the same real
+// client-isolation boundary as every other model above -- no query path
+// returns another account's campaign.
+model CampaignRecord {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaignName String
+  requestId    String
+  dataAvailable Boolean
+  // "not-started" | "in-progress" -- mirrors CampaignPhase; "completed" is
+  // deliberately never stored here either, per the real agent's own rule
+  // that this build has no real publisher-response data source to justify it.
+  phase        String
+  totalApprovedPublishers Int
+  draftedCount Int
+  skippedCount Int
+  // Full real CampaignTrackingResult snapshot (JSON: progressReports,
+  // performanceSummary, limitations, decidedAt) -- read back exactly as the
+  // real agent produced it, never re-derived or fabricated at read time.
+  // Matches this schema's existing resultJson convention (SeoAudit, Report,
+  // ContentDraft, RemediationApproval).
+  resultJson String
+  decidedAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  deliverables Deliverable[]
+
+  @@unique([userId, campaignName])
+  @@index([userId, updatedAt])
 }

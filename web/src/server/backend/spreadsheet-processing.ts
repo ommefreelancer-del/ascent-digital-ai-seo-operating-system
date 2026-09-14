@@ -24,7 +24,7 @@ import {
   type CleaningApprovalRecord,
 } from "./spreadsheet-cleaning-approval";
 import { saveCleaningArtifacts } from "./spreadsheet-cleaning-artifacts";
-import { writeApprovedCleaningToGoogleSheets } from "./spreadsheet-google-sheets-writeback";
+import { writeApprovedCleaningRespectingMode } from "./spreadsheet-existing-output-cleanup";
 import { getWriteDestinationSpreadsheet } from "@/server/google-sheets";
 import { buildSpreadsheetCleaningApprovalMeta, type SpreadsheetCleaningApprovalMeta, type SpreadsheetProcessingResult } from "./spreadsheet-cleaning-approval-meta";
 
@@ -225,7 +225,17 @@ export async function resolveCleaningApprovalReply(userId: string, message: stri
     };
   }
 
-  const writeResult = await writeApprovedCleaningToGoogleSheets(userId, approved.record, selected.id);
+  const dispatch = await writeApprovedCleaningRespectingMode(userId, approved.record, selected.id);
+  if (dispatch.mode === "existing-tab-replace") {
+    const writeResult = dispatch.result;
+    return {
+      handled: true,
+      reply: writeResult.ok
+        ? `Approved -- "${writeResult.tabName}" in "${selected.name}" was cleared and rewritten with ${writeResult.rowsWritten} de-duplicated record(s).`
+        : `Approved, but the write to Google Sheets did not complete: ${writeResult.error}`,
+    };
+  }
+  const writeResult = dispatch.result;
   return {
     handled: true,
     reply: writeResult.ok
