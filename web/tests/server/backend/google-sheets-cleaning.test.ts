@@ -8,23 +8,33 @@
 //
 // Real DB, real filesystem artifact writes (same established convention as
 // spreadsheet-processing.test.ts) -- only @/server/google-sheets is mocked (getSelectedSpreadsheet /
-// getAllSpreadsheetValues), since this suite is about processSelectedGoogleSheet()'s OWN deterministic
-// logic, not about re-proving getAllSpreadsheetValues()'s own real batching (already covered by
-// tests/server/google-sheets.test.ts). Zero real network calls, zero live Google Drive/Sheets calls,
-// zero paid API calls.
+// getAllSpreadsheetValues / getWriteDestinationSpreadsheet / listSpreadsheets), since this suite is about
+// processSelectedGoogleSheet()'s OWN deterministic logic, not about re-proving getAllSpreadsheetValues()'s
+// own real batching (already covered by tests/server/google-sheets.test.ts) or listSpreadsheets()'s own
+// real Drive call (covered by google-sheets.test.ts too). Zero real network calls, zero live Google
+// Drive/Sheets calls, zero paid API calls.
+//
+// DESTINATION-SELECTION RESTORATION (2026-09-16): getWriteDestinationSpreadsheetMock/listSpreadsheetsMock
+// default to "not configured, zero spreadsheets" for every test below UNLESS a test explicitly overrides
+// them -- these tests are about the cleaning pipeline itself, not the destination-selection behavior
+// (that has its own dedicated suite, google-sheets-destination-selection.test.ts).
 
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../../../src/server/db";
 import type { AllSpreadsheetValuesResult } from "../../../src/server/google-sheets";
 
 const getSelectedSpreadsheetMock = vi.fn();
 const getAllSpreadsheetValuesMock = vi.fn();
+const getWriteDestinationSpreadsheetMock = vi.fn();
+const listSpreadsheetsMock = vi.fn();
 vi.mock("@/server/google-sheets", () => ({
   getSelectedSpreadsheet: (...args: unknown[]) => getSelectedSpreadsheetMock(...args),
   getAllSpreadsheetValues: (...args: unknown[]) => getAllSpreadsheetValuesMock(...args),
+  getWriteDestinationSpreadsheet: (...args: unknown[]) => getWriteDestinationSpreadsheetMock(...args),
+  listSpreadsheets: (...args: unknown[]) => listSpreadsheetsMock(...args),
 }));
 
 const { processSelectedGoogleSheet } = await import("../../../src/server/backend/google-sheets-cleaning");
@@ -35,9 +45,20 @@ const ATTACHMENTS_STORAGE_ROOT = path.join(process.cwd(), "var", "attachments");
 const createdUserIds: string[] = [];
 const createdAttachmentIds: string[] = [];
 
+beforeEach(() => {
+  // Sensible, non-destination-specific default for every test in this file -- "not configured, zero
+  // spreadsheets" -- so tests about the cleaning pipeline itself don't need to know about destination
+  // selection at all. Individual tests may override via mockResolvedValueOnce before calling
+  // processSelectedGoogleSheet.
+  getWriteDestinationSpreadsheetMock.mockResolvedValue(null);
+  listSpreadsheetsMock.mockResolvedValue([]);
+});
+
 afterEach(async () => {
   getSelectedSpreadsheetMock.mockReset();
   getAllSpreadsheetValuesMock.mockReset();
+  getWriteDestinationSpreadsheetMock.mockReset();
+  listSpreadsheetsMock.mockReset();
   for (const id of createdAttachmentIds.splice(0)) {
     const approvals = await db.spreadsheetCleaningApproval.findMany({ where: { attachmentId: id } });
     for (const approval of approvals) {

@@ -34,11 +34,11 @@ describe("processSelectedGoogleSheet's read-only cleaning path no longer depends
     );
   });
 
-  it("google-sheets-cleaning.ts's only Google Sheets import is the read-only surface (getSelectedSpreadsheet/getAllSpreadsheetValues) -- no write-scope or write-destination functions", () => {
+  it("google-sheets-cleaning.ts's Google Sheets import stays read-only -- getWriteDestinationSpreadsheet()/listSpreadsheets() (2026-09-16, both genuinely read-only -- see readWriteDestinationForDuplicateProtection()'s own header) are fine; the genuinely WRITE-CAPABLE surface (appendSpreadsheetValues/ensureSheetExists/assertSheetsWriteScope/setWriteDestinationSpreadsheet) is still never imported", () => {
     const importLine = cleaningSource.match(/import \{[^}]*\} from ["']@\/server\/google-sheets["'];/)?.[0] ?? "";
     expect(importLine).toContain("getSelectedSpreadsheet");
     expect(importLine).toContain("getAllSpreadsheetValues");
-    expect(importLine).not.toMatch(/getWriteDestinationSpreadsheet|setWriteDestinationSpreadsheet|appendSpreadsheetValues|ensureSheetExists|assertSheetsWriteScope/);
+    expect(importLine).not.toMatch(/setWriteDestinationSpreadsheet|appendSpreadsheetValues|ensureSheetExists|assertSheetsWriteScope/);
   });
 
   it("the new shared approval-meta module's only import statement is the pre-existing, already-committed spreadsheet-cleaning-approval.ts type -- never the write-back path, @/server/google-sheets, or credential-encryption", () => {

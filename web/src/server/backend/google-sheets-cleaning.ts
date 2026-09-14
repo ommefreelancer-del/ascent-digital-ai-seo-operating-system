@@ -26,7 +26,7 @@
 // constraint without inventing a second approval model or touching schema.prisma.
 
 import { db } from "@/server/db";
-import { getSelectedSpreadsheet, getAllSpreadsheetValues, type AllSpreadsheetValuesResult } from "@/server/google-sheets";
+import { getSelectedSpreadsheet, getAllSpreadsheetValues, getWriteDestinationSpreadsheet, listSpreadsheets, type AllSpreadsheetValuesResult } from "@/server/google-sheets";
 import { buildCleaningResult, buildCleaningAuditCsv, type CleaningResult } from "./spreadsheet-cleaning";
 import {
   mapToFinalBusinessSchema,
@@ -54,6 +54,94 @@ const MAX_ROWS_FOR_SERVER_SIDE_PROCESSING = 200_000;
 const MAX_DUPLICATE_GROUPS_SHOWN = 20;
 const MAX_FLAGGED_ROWS_SHOWN = 20;
 const MAX_TRAFFIC_SAMPLES_SHOWN = 10;
+
+// DESTINATION-SELECTION RESTORATION (2026-09-16): a real, live-confirmed workflow gap -- the Health Master
+// live-sheet cleaning path built a full proposal without ever checking whether a Google Sheets WRITE
+// destination was configured, and without reading that destination's existing content at all. The
+// write-destination selector itself already exists and already works (Settings -> Integrations' "Write
+// destination" dropdown, backed by the real getWriteDestinationSpreadsheet()/setWriteDestinationSpreadsheet()
+// pair and listSpreadsheets() discovery -- see settings-shell.tsx and
+// api/integrations/google-sheets/write-destination/route.ts) -- the attachment-upload cleaning path
+// (spreadsheet-processing.ts) already relies on it at APPROVAL time. This module never surfaced it at
+// PROPOSAL time, so a user cleaning "Health Master Sheet" had no visibility into whether -- or where --
+// approved results could even be written, and no read of the real destination's existing priced/deal-done
+// records to protect them from later duplicate resolution (that price-aware protection ALGORITHM is a
+// separate, later task -- this only restores the missing SELECTION + READ step so that algorithm has real
+// data to work with once it exists).
+//
+// Deliberately reuses the EXISTING architecture end to end -- getWriteDestinationSpreadsheet() (never a new
+// selection mechanism), listSpreadsheets() (the same real, already-authenticated Drive discovery every other
+// selector in this codebase uses), and getAllSpreadsheetValues() (the same read-only batch reader Health
+// Master's own source read uses) -- and NEVER hardcodes any particular destination sheet's name anywhere in
+// this file: whatever the user has configured (or has NOT configured yet, in which case their real, live
+// spreadsheet list is surfaced so they can choose) is what this reports and reads.
+export type DestinationReadOutcome =
+  | { readonly status: "not_configured"; readonly availableSpreadsheets: readonly { readonly id: string; readonly name: string }[] }
+  | { readonly status: "read_failed"; readonly destinationId: string; readonly destinationName: string; readonly reason: string }
+  | {
+      readonly status: "ok";
+      readonly destinationId: string;
+      readonly destinationName: string;
+      readonly headers: readonly string[];
+      readonly rows: readonly (readonly string[])[];
+      readonly rowsRead: number;
+      /** Real, exact (normalized) header matches only -- never a guess -- so a future duplicate-resolution
+       * step knows WHICH of the destination's own columns to trust for price/deal-status data. */
+      readonly pricingColumnsDetected: readonly string[];
+    };
+
+/** Ceiling for the destination read -- same value and same honesty convention as MAX_ROWS_FOR_SERVER_SIDE_PROCESSING above: a real, large existing Admin/deal-tracking destination must never be silently truncated either. */
+const MAX_ROWS_FOR_DESTINATION_READ = 200_000;
+
+const PRICING_COLUMN_NAMES = ["Admin Price", "Client Price", "Profit", "Deal Status"];
+
+function normalizeHeaderForPricingMatch(header: string): string {
+  return header.trim().toLowerCase();
+}
+
+/** Real, exact (normalized) matches only against PRICING_COLUMN_NAMES -- never a substring/fuzzy guess. Preserves the destination's OWN header casing/spelling in the returned list (never rewritten). */
+function detectPricingColumns(headers: readonly string[]): readonly string[] {
+  const normalizedTargets = new Set(PRICING_COLUMN_NAMES.map(normalizeHeaderForPricingMatch));
+  return headers.filter((header) => normalizedTargets.has(normalizeHeaderForPricingMatch(header)));
+}
+
+/**
+ * Restores the missing destination-selection step: if the user has NOT yet configured a Google Sheets
+ * write destination (via the EXISTING Settings -> Integrations selector), returns their real, live list of
+ * available spreadsheets (listSpreadsheets() -- the same authenticated Drive discovery every other selector
+ * in this codebase already uses) so they can choose one there -- never a hardcoded suggestion. If a
+ * destination IS configured, reads it COMPLETELY, read-only (getAllSpreadsheetValues() -- the exact same
+ * batch reader Health Master's own source read uses, so a large real destination sheet is never silently
+ * truncated), and reports which of its own columns look like real pricing/deal-status data -- making that
+ * data available to a FUTURE duplicate-resolution step without acting on it here. NEVER writes anywhere;
+ * NEVER hardcodes a destination name.
+ */
+export async function readWriteDestinationForDuplicateProtection(userId: string): Promise<DestinationReadOutcome> {
+  const destination = await getWriteDestinationSpreadsheet(userId);
+  if (!destination) {
+    const spreadsheets = await listSpreadsheets(userId);
+    return { status: "not_configured", availableSpreadsheets: spreadsheets.map((s) => ({ id: s.id, name: s.name })) };
+  }
+
+  try {
+    const readResult = await getAllSpreadsheetValues(userId, destination.id, { maxTotalRows: MAX_ROWS_FOR_DESTINATION_READ });
+    const [headerRow, ...dataRows] = readResult.values;
+    const headers = (headerRow ?? []).map((cell) => cell ?? "");
+    const rows = dataRows.map((row) => row.map((cell) => cell ?? ""));
+    return {
+      status: "ok",
+      destinationId: destination.id,
+      destinationName: destination.name,
+      headers,
+      rows,
+      rowsRead: rows.length,
+      pricingColumnsDetected: detectPricingColumns(headers),
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "an unknown error";
+    return { status: "read_failed", destinationId: destination.id, destinationName: destination.name, reason };
+  }
+}
 
 /**
  * The one, real, end-to-end live-sheet cleaning entry point: resolves the user's persisted selection
@@ -119,9 +207,12 @@ export async function processSelectedGoogleSheet(userId: string): Promise<Spread
   const auditCsv = buildCleaningAuditCsv(cleaningResult);
   await saveCleaningArtifacts(approval.id, cleanedWorkbook, auditCsv);
 
+  // DESTINATION-SELECTION RESTORATION: read-only, never writes -- see readWriteDestinationForDuplicateProtection()'s own header above.
+  const destinationOutcome = await readWriteDestinationForDuplicateProtection(userId);
+
   return {
     ok: true,
-    reply: buildLiveSheetCleaningReportForChat(selected.name, readResult, cleaningResult, trafficSplit.clientWebsites.rows.length, approval),
+    reply: buildLiveSheetCleaningReportForChat(selected.name, readResult, cleaningResult, trafficSplit.clientWebsites.rows.length, approval, destinationOutcome),
     approvalMeta: buildSpreadsheetCleaningApprovalMeta(selected.name, approval),
   };
 }
@@ -140,6 +231,7 @@ function buildLiveSheetCleaningReportForChat(
   result: CleaningResult,
   belowThresholdCount: number,
   approval: CleaningApprovalRecord,
+  destinationOutcome: DestinationReadOutcome,
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -217,6 +309,32 @@ function buildLiveSheetCleaningReportForChat(
   lines.push(`Domain/URL duplicate candidates flagged: ${domainDuplicateRowTotal} (in ${result.domainDuplicateGroups.length} group(s))`);
   lines.push(`Final retained records: ${result.retainedRowIndexes.length}`);
   lines.push(`Records requiring manual review: ${result.manualReviewRowIndexes.length}`);
+
+  lines.push("");
+  lines.push("=== F. WRITE DESTINATION ===");
+  if (destinationOutcome.status === "not_configured") {
+    lines.push("No Google Sheets write destination is configured yet -- this proposal cannot be written anywhere until you choose one.");
+    if (destinationOutcome.availableSpreadsheets.length === 0) {
+      lines.push("No spreadsheets were found in your connected Google account.");
+    } else {
+      lines.push("Available spreadsheets in your connected Google account:");
+      for (const s of destinationOutcome.availableSpreadsheets) lines.push(`  - ${s.name}`);
+    }
+    lines.push(
+      'Go to Settings -> Integrations -> "Write destination" and choose the sheet that should receive these records (e.g. your existing Admin/deal-tracking sheet) -- ADASOS never assumes or hard-codes a specific destination.',
+    );
+  } else if (destinationOutcome.status === "read_failed") {
+    lines.push(`Configured write destination: "${destinationOutcome.destinationName}", but reading its existing content failed: ${destinationOutcome.reason}`);
+    lines.push("Nothing was written. Fix the read failure before approving this proposal.");
+  } else {
+    lines.push(`Configured write destination: "${destinationOutcome.destinationName}". Read ${destinationOutcome.rowsRead} existing row(s) from it (read-only -- nothing written).`);
+    lines.push(
+      destinationOutcome.pricingColumnsDetected.length > 0
+        ? `Existing pricing/deal columns detected there: ${destinationOutcome.pricingColumnsDetected.join(", ")}.`
+        : "No pricing/deal columns (Admin Price / Client Price / Profit / Deal Status) were found there.",
+    );
+    lines.push("This data is now available to protect already-priced/deal-done records once duplicate-resolution logic is added -- not yet applied in this proposal.");
+  }
 
   lines.push("");
   lines.push(
