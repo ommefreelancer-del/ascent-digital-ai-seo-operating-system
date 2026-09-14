@@ -35,7 +35,29 @@
 // destination folder" (no Sheets-cleaning action AND domain signal actually co-occurring the way a real
 // Sheets request does) still does not match.
 
-const GOOGLE_SHEETS_CLEANING_DOMAIN_PHRASES: readonly string[] = ["google sheet", "google sheets", "spreadsheet", "health master", "write destination"];
+// GENERATED-OUTPUT CLEANUP (2026-09-21): a THIRD real, live-confirmed capability gap -- a request to clean
+// the "Admin - Vendor" tab (google-sheets-cleaning.ts's own generated output, ADMIN_VENDOR_SHEET_NAME in
+// spreadsheet-business-schema.ts) by comparing its URLs against a separate, PROTECTED comparison sheet (e.g.
+// "Admin Sheet Health") and removing duplicates only from "Admin - Vendor" scored as low as 0.21-0.35 under
+// ordinary scoring (real registry/router, reproduced offline) -- escalating to Prospecting/Competitor
+// Intelligence instead. "Admin - Vendor" is safe to recognize by name here, unlike a user-CHOSEN
+// source/destination spreadsheet name (e.g. "Health Master Sheet"/"Admin Sheet Health", never hardcoded --
+// see the "source"/"destination" word-boundary phrases below): it is ADASOS's OWN fixed, system-defined
+// output-tab name, never renamed by a user, already a literal exported constant
+// (ADMIN_VENDOR_SHEET_NAME = "Admin - Vendor"). "Client Sheet" (its sibling tab,
+// CLIENT_WEBSITES_SHEET_NAME) is deliberately NOT added here -- that phrase is generic enough ("prepare the
+// client sheet for the meeting") to risk false-positiving on unrelated business requests, unlike the
+// distinctively-formatted "Admin - Vendor" with its dash and "Vendor" term.
+const GOOGLE_SHEETS_CLEANING_DOMAIN_PHRASES: readonly string[] = [
+  "google sheet",
+  "google sheets",
+  "spreadsheet",
+  "health master",
+  "write destination",
+  "admin - vendor",
+  "admin-vendor",
+  "admin vendor",
+];
 
 // WHOLE-WORD-ONLY domain phrases (2026-09-20): "source" and "destination" are real, live-confirmed
 // substring-collision risks under plain .includes() matching -- a real, existing routing test's message
@@ -63,6 +85,7 @@ const GOOGLE_SHEETS_CLEANING_ACTION_PHRASES: readonly string[] = [
   "baseline",
   "read-only",
   "read only",
+  "compare",
 ];
 
 function includesAny(lower: string, phrases: readonly string[]): boolean {
