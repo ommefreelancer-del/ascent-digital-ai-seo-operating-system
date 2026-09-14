@@ -124,6 +124,29 @@ describe("readWriteDestinationForDuplicateProtection -- the core restored functi
     expect(outcome.rows).toEqual([["https://existing.com", "500", "done"]]);
   });
 
+  it("6b: ROW COLUMN-OFFSET REALIGNMENT (2026-09-21) -- a real, live-confirmed defect. A destination row shifted by leading blank columns (the exact Health Master Sheet defect, fixed in buildCleaningResult() via realignColumnShiftedRow(), now ALSO applied here) still has its real price/URL correctly detected instead of reading as blank", async () => {
+    getWriteDestinationSpreadsheetMock.mockResolvedValue({ id: "dest-id-1b", name: "Admin Sheet Health" });
+    getAllSpreadsheetValuesMock.mockResolvedValue({
+      values: [
+        ["URL", "Client Price", "Profit"],
+        // Genuinely shifted 2 columns to the right (2 leading, genuinely-empty cells) -- the exact real-world
+        // shape that made the live proposal report "0 existing priced/deal-done websites" despite this row
+        // being genuinely priced.
+        ["", "", "https://already-priced.com", "500", "120"],
+      ],
+      rowsRead: 1,
+      batchesRead: 1,
+      cappedAtSafetyLimit: false,
+    });
+
+    const outcome = await readWriteDestinationForDuplicateProtection("user-shift");
+
+    expect(outcome.status).toBe("ok");
+    if (outcome.status !== "ok") throw new Error("unreachable");
+    // Realigned back to the header's own 3-column shape -- URL/Client Price/Profit each at their real index.
+    expect(outcome.rows).toEqual([["https://already-priced.com", "500", "120"]]);
+  });
+
   it("7: existing pricing/deal columns (Admin Price / Client Price / Profit / Deal Status) are detected by real, exact header match and made available -- never fabricated, never guessed from an unrelated column", async () => {
     getWriteDestinationSpreadsheetMock.mockResolvedValue({ id: "dest-id-2", name: "Admin Tracker" });
     getAllSpreadsheetValuesMock.mockResolvedValue({

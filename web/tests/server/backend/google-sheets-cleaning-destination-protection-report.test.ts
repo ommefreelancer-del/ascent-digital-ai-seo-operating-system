@@ -120,4 +120,49 @@ describe("processSelectedGoogleSheet -- destination-protection evidence in the A
     expect(reply).not.toContain("Deal Done With Admin");
     expect(reply).not.toContain("DEAL DONE WITH ADMIN");
   });
+
+  it("ROW COLUMN-OFFSET REALIGNMENT (2026-09-21): a real, live-confirmed defect -- a destination row shifted by leading blank columns (the exact reported '0 existing priced/deal-done websites' failure) is now correctly detected as priced and protects the matching incoming duplicate", async () => {
+    getSelectedSpreadsheetMock.mockResolvedValue({ id: "health-master-id", name: "Health Master Sheet" });
+    getWriteDestinationSpreadsheetMock.mockResolvedValue({ id: "admin-sheet-health-id", name: "Admin Sheet Health" });
+
+    getAllSpreadsheetValuesMock.mockImplementation((_userId: string, spreadsheetId: string) => {
+      if (spreadsheetId === "health-master-id") {
+        return Promise.resolve({
+          values: [
+            ["URL", "Domain Search Traffic (ST)"],
+            ["https://already-priced-prospect.com", "5000"], // duplicates the SHIFTED, genuinely-priced destination row below
+          ],
+          rowsRead: 1,
+          batchesRead: 1,
+          cappedAtSafetyLimit: false,
+        });
+      }
+      if (spreadsheetId === "admin-sheet-health-id") {
+        return Promise.resolve({
+          values: [
+            ["Website", "Client Price", "Profit"],
+            // Genuinely shifted 2 columns right (2 real, empty leading cells) -- WITHOUT the realignment fix,
+            // this row's price/URL land at the wrong index and read as blank, so it was never detected as
+            // priced and the matching incoming duplicate was never protected.
+            ["", "", "https://already-priced-prospect.com", "500", "120"],
+          ],
+          rowsRead: 1,
+          batchesRead: 1,
+          cappedAtSafetyLimit: false,
+        });
+      }
+      throw new Error(`unexpected getAllSpreadsheetValues call for ${spreadsheetId}`);
+    });
+
+    const userId = await createTestUser();
+    const result = await processSelectedGoogleSheet(userId);
+
+    expect(result.ok).toBe(true);
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+
+    const reply = result.reply!;
+    expect(reply).toContain("Destination protection APPLIED: 1 existing website(s) in the destination are already priced/deal-done");
+    expect(reply).toMatch(/1 incoming Health Master duplicate\(s\) of an already-priced destination record were OMITTED/);
+  });
 });

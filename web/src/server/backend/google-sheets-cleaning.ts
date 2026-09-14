@@ -27,7 +27,7 @@
 
 import { db } from "@/server/db";
 import { getSelectedSpreadsheet, getAllSpreadsheetValues, getWriteDestinationSpreadsheet, listSpreadsheets, type AllSpreadsheetValuesResult } from "@/server/google-sheets";
-import { buildCleaningResult, buildCleaningAuditCsv, type CleaningResult } from "./spreadsheet-cleaning";
+import { buildCleaningResult, buildCleaningAuditCsv, realignColumnShiftedRow, type CleaningResult } from "./spreadsheet-cleaning";
 import {
   mapToFinalBusinessSchema,
   splitByOrganicTraffic,
@@ -137,7 +137,17 @@ export async function readWriteDestinationForDuplicateProtection(userId: string)
     const readResult = await getAllSpreadsheetValues(userId, destination.id, { maxTotalRows: MAX_ROWS_FOR_DESTINATION_READ });
     const [headerRow, ...dataRows] = readResult.values;
     const headers = (headerRow ?? []).map((cell) => cell ?? "");
-    const rows = dataRows.map((row) => row.map((cell) => cell ?? ""));
+    // ROW COLUMN-OFFSET REALIGNMENT (2026-09-21): a real, live-confirmed defect -- a live proposal reported
+    // "0 existing priced/deal-done websites" for a real destination ("Admin Sheet Health") known to contain
+    // priced records. Root cause: this read never applied realignColumnShiftedRow() (spreadsheet-cleaning.ts),
+    // the SAME leading-blank-column-offset fix the Health Master SOURCE read already applies in
+    // buildCleaningResult() (see that function's own header -- a real Health Master run had 72% of its rows
+    // shifted this way). Without it, a shifted destination row's price/URL cells land at the WRONG fixed
+    // index in buildProtectedWebsiteSet() (spreadsheet-destination-protection.ts), so a genuinely-priced
+    // record reads as blank there and is silently treated as unprotected. Applied here, once, before this
+    // outcome is handed to buildProtectedWebsiteSet() (or reported to the user) -- never a second, separate
+    // realignment implementation.
+    const rows = dataRows.map((row) => realignColumnShiftedRow(row.map((cell) => cell ?? ""), headers.length));
     return {
       status: "ok",
       destinationId: destination.id,
