@@ -60,6 +60,7 @@ import { classifyTaskIntent, isOrchestratedIntent, isReadOnlyRequest, type TaskI
 import { isProspectingIntent } from "./prospecting-intent-detector.js";
 import { isCampaignTrackingIntent } from "./campaign-tracking-intent-detector.js";
 import { isHumanApprovalGateIntent } from "./human-approval-gate-intent-detector.js";
+import { isGoogleSheetsCleaningIntent } from "./google-sheets-cleaning-intent-detector.js";
 import { isSystemVerificationIntent } from "./system-verification-intent-detector.js";
 import { findExplicitAgentMatch, findUnresolvedAgentMention } from "./explicit-agent-match.js";
 
@@ -68,6 +69,8 @@ const ORCHESTRATION_CAPABILITY: CapabilityClass = "orchestration";
 const PROSPECTING_AGENT_ID = "prospecting-agent";
 /** Grounded in registry/agent-spec-parser.ts's deriveAgentId() -- "campaign-tracking-agent" from Agents/campaign-tracking-agent.md's own filename, matching src/agents/campaign-tracking-agent/dispatch.ts's CAMPAIGN_TRACKING_AGENT_ID. */
 const CAMPAIGN_TRACKING_AGENT_ID = "campaign-tracking-agent";
+/** Grounded in registry/agent-spec-parser.ts's deriveAgentId() -- "google-sheets-integration-agent" from Agents/google-sheets-integration-agent.md's own filename, matching web/src/app/api/workspace/messages/route.ts's own GOOGLE_SHEETS_INTEGRATION_AGENT_ID constant. */
+const GOOGLE_SHEETS_INTEGRATION_AGENT_ID = "google-sheets-integration-agent";
 
 export interface TaskRouterConfig {
   /** Minimum score (0-1) a top candidate must reach to be auto-assigned. */
@@ -138,7 +141,20 @@ export class TaskRouter {
     // stages -- the ORIGINAL production-routing-fix example this file's
     // header documents -- keeps classifying "end_to_end_seo"/"orchestrated"
     // exactly as before, unaffected.
-    if (isHumanApprovalGateIntent(task.description)) {
+    //
+    // GOOGLE SHEETS CLEANING ROUTING FIX (2026-09-17): a real, live-confirmed
+    // defect -- HUMAN_APPROVAL_GATE_PHRASES includes generic phrases
+    // ("pending approval", "pending approvals") that a genuine Google Sheets
+    // cleaning proposal naturally uses when describing its own
+    // human-approval-gated write step, so a request to "clean Health Master
+    // Sheet using the configured ... destination" was hijacked into
+    // "human_approval_gate" before ever reaching specialist routing. Human
+    // approval is a LATER workflow state for the cleaning result, never the
+    // specialist responsible for producing it. See
+    // google-sheets-cleaning-intent-detector.ts's own header -- narrow
+    // enough that a genuine "check my pending approvals" request with no
+    // Sheets-cleaning signal at all is completely unaffected.
+    if (isHumanApprovalGateIntent(task.description) && !isGoogleSheetsCleaningIntent(task.description)) {
       return {
         taskId: task.id,
         status: "human_approval_gate",
@@ -148,6 +164,48 @@ export class TaskRouter {
           "This request explicitly names the Human Approval Gate -- routed directly to the real, workspace-scoped " +
           "pending-approval state (web/src/server/backend/remediation.ts) instead of the full audit-first " +
           "orchestrated pipeline, which the gate would otherwise only be reachable through as a middle stage.",
+        decidedAt,
+      };
+    }
+
+    // GOOGLE SHEETS CLEANING ROUTING FIX (2026-09-17): checked immediately after the (now carved-out)
+    // Human Approval Gate tier above, and before every other tier below -- a genuine Google Sheets
+    // cleaning request must deterministically reach google-sheets-integration-agent regardless of what
+    // else co-occurs in the same message. This is NOT relying on the carve-out above alone: ordinary
+    // TagWeightedRoutingStrategy scoring was empirically confirmed (real registry, real strategy) to score
+    // this agent as low as 0.22-0.33 for a real cleaning-proposal-shaped message -- well below the
+    // auto-assign threshold -- because generic approval/proposal safety language dilutes keyword/tag
+    // overlap against this agent's narrower spec, the same class of problem prospecting/campaign-tracking's
+    // own deterministic gates below already solve for their own domains. Mirrors those two gates' exact
+    // structure (mixed-stage guard, then a real registry-membership-guarded "assigned" short-circuit).
+    const hasGoogleSheetsCleaningIntent = isGoogleSheetsCleaningIntent(task.description);
+    if (hasGoogleSheetsCleaningIntent && taskIntent && isOrchestratedIntent(taskIntent)) {
+      return {
+        taskId: task.id,
+        status: "orchestrated",
+        taskIntent,
+        candidates: [],
+        rationale:
+          `This request combines a Google Sheets cleaning ask with another SEO-workflow stage (classified as ` +
+          `"${taskIntent}") -- no single specialist owns both; the Boss Agent owns it end-to-end, dispatching to ` +
+          "the Google Sheets Integration Agent and the relevant specialist as needed.",
+        decidedAt,
+      };
+    }
+    const googleSheetsIntegrationSpec = hasGoogleSheetsCleaningIntent ? this.registry.getById(GOOGLE_SHEETS_INTEGRATION_AGENT_ID) : undefined;
+    if (hasGoogleSheetsCleaningIntent && googleSheetsIntegrationSpec) {
+      return {
+        taskId: task.id,
+        status: "assigned",
+        assignedAgentId: GOOGLE_SHEETS_INTEGRATION_AGENT_ID,
+        taskIntent,
+        candidates: [{ agentId: googleSheetsIntegrationSpec.id, agentTitle: googleSheetsIntegrationSpec.title, score: 1, matchedTerms: [] }],
+        rationale:
+          "This request clearly asks to clean/process a Google Sheet (source, write destination, and/or the " +
+          "cleaning result itself) -- a deterministic capability gate assigned it directly to the Google Sheets " +
+          "Integration Agent before generic specialist scoring, regardless of any approval/proposal/do-not-write " +
+          "safety language also present -- human approval is a later workflow state for the result, never the " +
+          "specialist responsible for producing it.",
         decidedAt,
       };
     }
