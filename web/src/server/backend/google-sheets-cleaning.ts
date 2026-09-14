@@ -40,6 +40,7 @@ import { buildXlsxWorkbook } from "./xlsx-writer";
 import { createPendingCleaningApproval, type CleaningApprovalRecord } from "./spreadsheet-cleaning-approval";
 import { saveCleaningArtifacts } from "./spreadsheet-cleaning-artifacts";
 import { buildSpreadsheetCleaningApprovalMeta, type SpreadsheetProcessingResult } from "./spreadsheet-cleaning-approval-meta";
+import { applyDestinationProtection, type DestinationProtectionResult } from "./spreadsheet-destination-protection";
 
 /**
  * Ceiling for THIS server-side path only -- deliberately much higher than
@@ -119,8 +120,17 @@ function detectPricingColumns(headers: readonly string[]): readonly string[] {
 export async function readWriteDestinationForDuplicateProtection(userId: string): Promise<DestinationReadOutcome> {
   const destination = await getWriteDestinationSpreadsheet(userId);
   if (!destination) {
-    const spreadsheets = await listSpreadsheets(userId);
-    return { status: "not_configured", availableSpreadsheets: spreadsheets.map((s) => ({ id: s.id, name: s.name })) };
+    // Real, honest fallback -- listSpreadsheets() itself makes a real Drive call and throws when there's no
+    // usable Google connection at all (not just "no destination chosen yet"); never let that crash this
+    // read-only investigative step. An empty list is the honest answer when the real list can't be fetched.
+    let availableSpreadsheets: { id: string; name: string }[] = [];
+    try {
+      const spreadsheets = await listSpreadsheets(userId);
+      availableSpreadsheets = spreadsheets.map((s) => ({ id: s.id, name: s.name }));
+    } catch {
+      availableSpreadsheets = [];
+    }
+    return { status: "not_configured", availableSpreadsheets };
   }
 
   try {
@@ -199,7 +209,20 @@ export async function processSelectedGoogleSheet(userId: string): Promise<Spread
   const approval = await createPendingCleaningApproval(userId, sourceRecord.id, cleaningResult);
 
   const businessSchema = mapToFinalBusinessSchema(cleaningResult.headers, cleaningResult.retainedRows, cleaningResult.urlColumnIndex);
-  const trafficSplit = splitByOrganicTraffic(businessSchema);
+
+  // DESTINATION PROTECTION (2026-09-18): read-only, never writes -- see
+  // readWriteDestinationForDuplicateProtection()'s and applyDestinationProtection()'s own headers above.
+  // Fetched and applied BEFORE the traffic split/artifacts below, so an incoming record that duplicates an
+  // already-priced destination record never reaches the written/downloadable output at all -- the existing
+  // destination record itself is never read here for removal, only consulted to decide about INCOMING rows.
+  const destinationOutcome = await readWriteDestinationForDuplicateProtection(userId);
+  const destinationProtection: DestinationProtectionResult | null =
+    destinationOutcome.status === "ok" ? applyDestinationProtection(businessSchema, destinationOutcome) : null;
+  const eligibleSchema = destinationProtection?.applied
+    ? { headers: businessSchema.headers, rows: destinationProtection.eligibleRows, mappedColumns: businessSchema.mappedColumns }
+    : businessSchema;
+
+  const trafficSplit = splitByOrganicTraffic(eligibleSchema);
   const cleanedWorkbook = buildXlsxWorkbook([
     { name: ADMIN_VENDOR_SHEET_NAME, headers: trafficSplit.adminVendor.headers, rows: trafficSplit.adminVendor.rows, columnWidths: BUSINESS_SCHEMA_COLUMN_WIDTHS, wrapTextColumns: BUSINESS_SCHEMA_WRAP_TEXT_COLUMNS },
     { name: CLIENT_WEBSITES_SHEET_NAME, headers: trafficSplit.clientWebsites.headers, rows: trafficSplit.clientWebsites.rows, columnWidths: BUSINESS_SCHEMA_COLUMN_WIDTHS, wrapTextColumns: BUSINESS_SCHEMA_WRAP_TEXT_COLUMNS },
@@ -207,12 +230,9 @@ export async function processSelectedGoogleSheet(userId: string): Promise<Spread
   const auditCsv = buildCleaningAuditCsv(cleaningResult);
   await saveCleaningArtifacts(approval.id, cleanedWorkbook, auditCsv);
 
-  // DESTINATION-SELECTION RESTORATION: read-only, never writes -- see readWriteDestinationForDuplicateProtection()'s own header above.
-  const destinationOutcome = await readWriteDestinationForDuplicateProtection(userId);
-
   return {
     ok: true,
-    reply: buildLiveSheetCleaningReportForChat(selected.name, readResult, cleaningResult, trafficSplit.clientWebsites.rows.length, approval, destinationOutcome),
+    reply: buildLiveSheetCleaningReportForChat(selected.name, readResult, cleaningResult, trafficSplit.clientWebsites.rows.length, approval, destinationOutcome, destinationProtection),
     approvalMeta: buildSpreadsheetCleaningApprovalMeta(selected.name, approval),
   };
 }
@@ -232,6 +252,7 @@ function buildLiveSheetCleaningReportForChat(
   belowThresholdCount: number,
   approval: CleaningApprovalRecord,
   destinationOutcome: DestinationReadOutcome,
+  destinationProtection: DestinationProtectionResult | null,
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -333,7 +354,18 @@ function buildLiveSheetCleaningReportForChat(
         ? `Existing pricing/deal columns detected there: ${destinationOutcome.pricingColumnsDetected.join(", ")}.`
         : "No pricing/deal columns (Admin Price / Client Price / Profit / Deal Status) were found there.",
     );
-    lines.push("This data is now available to protect already-priced/deal-done records once duplicate-resolution logic is added -- not yet applied in this proposal.");
+    if (!destinationProtection?.applied) {
+      lines.push("Destination protection could NOT be applied -- no URL/domain column was detected in the destination, so no existing record could be matched against incoming records. Every existing destination record still stays exactly as-is (nothing here writes to or reads-for-removal from the destination).");
+    } else {
+      lines.push(`Destination protection APPLIED: ${destinationProtection.protectedDestinationWebsiteCount} existing website(s) in the destination are already priced/deal-done -- treated as the protected baseline.`);
+      lines.push(
+        `  - ${destinationProtection.protectedOmittedRows.length} incoming Health Master duplicate(s) of an already-priced destination record were OMITTED from this proposal (the existing destination record is untouched).`,
+      );
+      lines.push(
+        `  - ${destinationProtection.flaggedForManualReviewRows.length} incoming record(s) duplicate an already-priced destination record AND are themselves priced -- held back and FLAGGED for manual review (neither auto-written nor auto-deleted).`,
+      );
+      lines.push("Existing destination records are never cleared, truncated, replaced, or overwritten -- any real write only appends genuinely new/eligible records alongside them.");
+    }
   }
 
   lines.push("");
