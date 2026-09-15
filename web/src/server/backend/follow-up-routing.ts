@@ -82,6 +82,7 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { matchSpreadsheetOperationTerm } from "./spreadsheet-processing";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const backendDist = path.resolve(here, "../../../../dist/src");
@@ -214,6 +215,39 @@ export async function shouldRouteBackToWebsiteAuditAgent(previousAssignedAgentId
   return !(await hasFollowUpActionChanged(message));
 }
 
+// GOOGLE SHEETS RE-VALIDATION FOLLOW-UP FIX (2026-09-15): a real, live-reported production defect,
+// symmetric to the Website Audit Agent override above -- a genuine follow-up to a completed Google
+// Sheets Integration Agent cleaning task (e.g. "Now validate this live -- run it again and confirm the
+// result.") carries neither this project's own explicit-agent-name phrasing nor a spreadsheet attachment
+// (hasSpreadsheetProcessingIntent() in tag-weighted-routing-strategy.ts only boosts this agent's score
+// when an attachment is present), so a fresh classification can score it against a completely unrelated
+// specialist purely on generic vocabulary overlap -- live-observed scoring "Website Audit Agent" at 0.44,
+// below the 0.50 auto-assign threshold, and failing to route at all. The task's own real work still got
+// done (route.ts's forceGoogleSheetsRevalidation dispatch bypass), but the DISPLAYED/PERSISTED routing
+// decision was left wrong -- "Rejected", "Best match Website Audit Agent" -- which is what this fixes:
+// resolveFollowUp() below now returns a genuine "assigned to google-sheets-integration-agent" decision
+// for this exact case, the same way it already does for Website Audit Agent, so the Task Progress UI and
+// persisted ChatMessage state are consistent with what actually happened.
+const GOOGLE_SHEETS_INTEGRATION_AGENT_ID = "google-sheets-integration-agent";
+
+/** Real, verbatim matched term (never a guess) -- reuses spreadsheet-processing.ts's own SPREADSHEET_OPERATION_PATTERN (the SAME broad, already-tested detector the attachment-based dispatch path uses), deliberately NOT a new, narrower phrase list -- see this file's header on why being broad here is still safe. */
+export function matchGoogleSheetsIntegrationFollowUpTerm(message: string): string | null {
+  return matchSpreadsheetOperationTerm(message);
+}
+
+/** True when `message` refers back to a previous Google Sheets Integration Agent cleaning task using a real spreadsheet-operation verb (read/clean/dedup/validate/compare/etc.) -- context-continuity signal only, mirroring isWebsiteAuditFollowUp()'s own role for its specialist. */
+export function isGoogleSheetsIntegrationFollowUp(message: string): boolean {
+  return matchGoogleSheetsIntegrationFollowUpTerm(message) !== null;
+}
+
+/** True when this session's previous completed task was handled by Google Sheets Integration Agent, the current message is a real context-continuity reference to it, AND the message's own requested action has NOT changed to a different capability domain -- exactly mirrors shouldRouteBackToWebsiteAuditAgent()'s reasoning for a different specialist's own domain (reuses the SAME hasFollowUpActionChanged() capability check -- none of ACTION_CHANGING_CAPABILITIES are things Google Sheets Integration Agent handles either, so it's directly reusable, unmodified). */
+export async function shouldRouteBackToGoogleSheetsIntegration(previousAssignedAgentId: string | null, message: string): Promise<boolean> {
+  if (previousAssignedAgentId !== GOOGLE_SHEETS_INTEGRATION_AGENT_ID || !isGoogleSheetsIntegrationFollowUp(message)) {
+    return false;
+  }
+  return !(await hasFollowUpActionChanged(message));
+}
+
 // Broader than FOLLOW_UP_TERMS -- generic case-continuation phrasing, not
 // specific to Website Audit Agent's own domain. See this file's header
 // ("CASE CONTINUITY") for the real defect this closes: these are the exact
@@ -260,7 +294,8 @@ export interface PreviousCaseSnapshot {
 export type FollowUpAction =
   | { readonly kind: "use_fresh_decision" }
   | { readonly kind: "resume_orchestrated_case"; readonly taskIntent: string }
-  | { readonly kind: "route_back_to_website_audit"; readonly matchedTerm: string };
+  | { readonly kind: "route_back_to_website_audit"; readonly matchedTerm: string }
+  | { readonly kind: "route_back_to_google_sheets_integration"; readonly matchedTerm: string };
 
 /**
  * THE single, unified follow-up/case-continuity decision -- see this file's
@@ -315,6 +350,14 @@ export async function resolveFollowUp(
   // completed Website Audit Agent (audit_only) task.
   if (!looksLikeNewTask && previous.assignedAgentId === WEBSITE_AUDIT_AGENT_ID && isWebsiteAuditFollowUp(message) && !(await hasFollowUpActionChanged(message))) {
     return { kind: "route_back_to_website_audit", matchedTerm: matchWebsiteAuditFollowUpTerm(message) ?? "" };
+  }
+
+  // Rule 3.5 (GOOGLE SHEETS RE-VALIDATION FOLLOW-UP FIX, 2026-09-15): symmetric to Rule 3 above -- see
+  // this file's header (search "GOOGLE SHEETS RE-VALIDATION") for the real, live-reported defect this
+  // closes. shouldRouteBackToGoogleSheetsIntegration() already encapsulates the previous-agent-identity
+  // and action-unchanged checks; only looksLikeNewTask is applied here, matching Rule 3's own shape.
+  if (!looksLikeNewTask && (await shouldRouteBackToGoogleSheetsIntegration(previous.assignedAgentId, message))) {
+    return { kind: "route_back_to_google_sheets_integration", matchedTerm: matchGoogleSheetsIntegrationFollowUpTerm(message) ?? "" };
   }
 
   return { kind: "use_fresh_decision" };

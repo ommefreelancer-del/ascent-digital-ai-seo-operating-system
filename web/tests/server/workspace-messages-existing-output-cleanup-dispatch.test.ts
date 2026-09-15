@@ -30,11 +30,7 @@ describe("workspace messages route -- dispatch reaches proposeExistingOutputTabC
 
   it("this branch is checked BEFORE the existing processSelectedGoogleSheet() branch, so a self-cleanup request is never intercepted by the source-into-destination flow", () => {
     const selfCleanupIdx = routeSource.indexOf("await proposeExistingOutputTabCleanupForChat(userId, targets)");
-    // lastIndexOf, not indexOf: the GOOGLE SHEETS RE-VALIDATION STRUCTURAL BYPASS (2026-09-15, see
-    // route.ts's own header) also calls processSelectedGoogleSheet(userId, message) verbatim, EARLIER in
-    // the file, as its own fallback -- this assertion is specifically about the ORIGINAL, decision-gated
-    // source-into-destination branch (the LAST occurrence in the file), not the new bypass.
-    const sourceIntoDestinationIdx = routeSource.lastIndexOf("await processSelectedGoogleSheet(userId, message)");
+    const sourceIntoDestinationIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId, message)");
     expect(selfCleanupIdx).toBeGreaterThan(-1);
     expect(sourceIntoDestinationIdx).toBeGreaterThan(-1);
     expect(selfCleanupIdx).toBeLessThan(sourceIntoDestinationIdx);

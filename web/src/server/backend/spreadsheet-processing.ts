@@ -38,17 +38,30 @@ export { buildSpreadsheetCleaningApprovalMeta } from "./spreadsheet-cleaning-app
 // Anthropic-backed specialist reply and incurred a real external API call for a task that should never
 // have needed one. This function is a DELIBERATELY SEPARATE, redundant check from routing's own
 // hasSpreadsheetProcessingIntent() -- not because the logic needs to differ, but because
-// workspace/messages/route.ts's own dispatch chain (see this function's only call site there) uses it as
+// workspace/messages/route.ts's own dispatch chain (see this function's own call sites there) uses it as
 // a STRUCTURAL bypass that runs regardless of what classifyTaskIntent()/TagWeightedRoutingStrategy
 // decided, so a future gap in either of THOSE phrase lists can never again let a spreadsheet-only task
 // reach an Anthropic/Gemini/DataForSEO-dependent code path. Deliberately broad on operation verbs (read/
-// clean/dedupe/normalize/etc.) -- safe to be broad because this is ONLY ever consulted after the caller
-// has already confirmed a real spreadsheet-type attachment is present on THIS message (see route.ts's
-// `attachmentMeta && SPREADSHEET_FILE_TYPES.has(...)` guard around its call site).
+// clean/dedupe/normalize/etc.) -- originally safe to be broad only because it was consulted after the
+// caller had already confirmed a real spreadsheet-type attachment was present.
+//
+// GOOGLE SHEETS RE-VALIDATION FOLLOW-UP FIX (2026-09-15): this pattern is now ALSO the context-continuity
+// signal follow-up-routing.ts's shouldRouteBackToGoogleSheetsIntegration() uses (matchSpreadsheetOperationTerm()
+// below) to recognize a genuine follow-up to a Google Sheets Integration Agent cleaning task with NO
+// attachment at all -- e.g. "validate this live"/"run it again". Being broad is still safe there for the
+// SAME structural reason: follow-up-routing.ts additionally requires the previous real agent assignment
+// in this session to already be google-sheets-integration-agent (see that module's own header), so a
+// message merely sharing one of these generic verbs with no real prior Google Sheets context is never
+// hijacked into this domain.
 const SPREADSHEET_OPERATION_PATTERN = /\b(read|inspect\w*|extract\w*|pars\w*|process\w*|analy[zs]\w*|clean\w*|dedup\w*|normali[sz]\w*|duplicate\w*|malformed|incomplete|valid\w*|compare\w*)\b/i;
 
 export function looksLikeSpreadsheetOperationRequest(message: string): boolean {
   return SPREADSHEET_OPERATION_PATTERN.test(message);
+}
+
+/** Real, verbatim matched term (never a guess) -- the same real-text-matching discipline follow-up-routing.ts's own matchWebsiteAuditFollowUpTerm() uses, reusing the SAME pattern looksLikeSpreadsheetOperationRequest() already tests against, so the two can never drift apart. */
+export function matchSpreadsheetOperationTerm(message: string): string | null {
+  return message.match(SPREADSHEET_OPERATION_PATTERN)?.[0] ?? null;
 }
 
 const MAX_DUPLICATE_GROUPS_SHOWN = 20;
