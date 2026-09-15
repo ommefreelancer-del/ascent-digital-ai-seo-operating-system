@@ -646,6 +646,18 @@ const DOMAIN_LEVEL_DEDUP_PHRASES = /\bper[\s-]+(website|domain)\b|\bone[\s-]+(un
 // makes sense together with domain-level collapse, so matching this phrase ALSO implies dedupeByDomain in
 // detectDomainLevelDedupIntent() below.
 const PLATFORM_EXCLUSION_PHRASES = /\bexclud(e|ing)\b[^.?!]{0,60}\bplatform/i;
+// PERMANENT-RULES REFERENCE FIX (2026-09-15): a real, live-confirmed gap -- once the domain-level collapse
+// + platform-exclusion + pricing-protection behavior became the established "permanent duplicate-cleaning
+// rules" (see this module's own KNOWN_LARGE_PLATFORM_DOMAINS/PRICING_COLUMN_NAMES headers), every real
+// live chat invocation stopped re-stating "one record per domain" literally and instead just referenced
+// the rules by name -- "Clean the selected Health Sheet using the permanent duplicate-cleaning rules." --
+// exactly the standard, PDF-documented phrasing this project's own live tests now always use. That phrase
+// matches neither DOMAIN_LEVEL_DEDUP_PHRASES nor PLATFORM_EXCLUSION_PHRASES above, so dedupeByDomain
+// silently stayed false and every request through this exact, now-canonical wording fell back to
+// flag-only behavior (49 rows flagged, 0 collapsed) -- never actually applying the "permanent" rules it
+// named. Deliberately bounded ("permanent" within 60 chars of "rule(s)") so it stays a real, specific
+// signal rather than matching any unrelated mention of either word alone.
+const PERMANENT_RULES_PHRASES = /\bpermanent\b[^.?!]{0,60}\brules?\b|\brules?\b[^.?!]{0,60}\bpermanent\b/i;
 
 export interface DomainLevelDedupIntent {
   /** true when the message explicitly asks for one record per domain/website -- see DOMAIN_LEVEL_DEDUP_PHRASES above. Also true whenever excludePlatformDomains is true. */
@@ -663,6 +675,6 @@ export interface DomainLevelDedupIntent {
  */
 export function detectDomainLevelDedupIntent(message: string): DomainLevelDedupIntent {
   const excludePlatformDomains = PLATFORM_EXCLUSION_PHRASES.test(message);
-  const dedupeByDomain = excludePlatformDomains || DOMAIN_LEVEL_DEDUP_PHRASES.test(message);
+  const dedupeByDomain = excludePlatformDomains || DOMAIN_LEVEL_DEDUP_PHRASES.test(message) || PERMANENT_RULES_PHRASES.test(message);
   return { dedupeByDomain, excludePlatformDomains };
 }

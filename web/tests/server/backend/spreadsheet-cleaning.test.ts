@@ -333,6 +333,28 @@ describe("detectDomainLevelDedupIntent -- shared phrase detection for BOTH clean
     expect(detectDomainLevelDedupIntent("Please remove duplicates from this sheet.")).toEqual({ dedupeByDomain: false, excludePlatformDomains: false });
   });
 
+  // PERMANENT-RULES REFERENCE FIX (2026-09-15): PDF-documented, live-reported regression -- the project's
+  // OWN now-standard invocation phrasing ("...using the permanent duplicate-cleaning rules.") never
+  // literally restates "one record per domain", so it matched neither DOMAIN_LEVEL_DEDUP_PHRASES nor
+  // PLATFORM_EXCLUSION_PHRASES, and dedupeByDomain silently stayed false -- 49 domain-duplicate rows were
+  // flagged but never collapsed, even though "the permanent rules" are supposed to always include
+  // domain-level collapse (see google-sheets-cleaning.ts's own header).
+  it("REGRESSION (PDF-documented, live-reported): a bare reference to 'the permanent duplicate-cleaning rules' -- the project's own standard invocation phrasing, with NO literal 'one record per domain' restated -- still triggers domain-level dedup", () => {
+    expect(
+      detectDomainLevelDedupIntent("Use ONLY the Google Sheets Integration Agent. Clean the selected Health Sheet using the permanent duplicate-cleaning rules. Return the proposal only. Do not write until I approve."),
+    ).toEqual({ dedupeByDomain: true, excludePlatformDomains: false });
+  });
+
+  it("matches other real phrasings of the same reference ('permanent rules', 'permanent Health Sheet rules')", () => {
+    expect(detectDomainLevelDedupIntent("Apply the permanent rules to this sheet.")).toEqual({ dedupeByDomain: true, excludePlatformDomains: false });
+    expect(detectDomainLevelDedupIntent("Use the permanent Health Sheet rules from the PDFs exactly.")).toEqual({ dedupeByDomain: true, excludePlatformDomains: false });
+  });
+
+  it("does not fire on 'permanent' or 'rule(s)' alone, or when the two are too far apart to be the same reference", () => {
+    expect(detectDomainLevelDedupIntent("Please make this change permanent.")).toEqual({ dedupeByDomain: false, excludePlatformDomains: false });
+    expect(detectDomainLevelDedupIntent("What are the rules for this sheet?")).toEqual({ dedupeByDomain: false, excludePlatformDomains: false });
+  });
+
   it("KNOWN_LARGE_PLATFORM_DOMAINS is a real, non-empty, exported list usable by both flows", () => {
     expect(KNOWN_LARGE_PLATFORM_DOMAINS.length).toBeGreaterThan(10);
     expect(KNOWN_LARGE_PLATFORM_DOMAINS).toContain("linkedin.com");

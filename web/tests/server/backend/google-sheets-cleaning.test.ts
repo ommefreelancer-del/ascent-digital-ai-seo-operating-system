@@ -345,6 +345,42 @@ describe("processSelectedGoogleSheet -- domain-level dedup (2026-09-24 fix): 'on
     expect(result.reply).not.toContain("EXCLUDED from domain-level collapsing");
   });
 
+  // PERMANENT-RULES REFERENCE FIX (2026-09-15): PDF-documented, live-reported regression -- the project's
+  // OWN now-standard, real live-chat invocation phrasing ("Use ONLY the Google Sheets Integration Agent.
+  // Clean the selected Health Sheet using the permanent duplicate-cleaning rules. Return the proposal
+  // only. Do not write until I approve.") never literally restates "one record per domain", so it fell
+  // through to flag-only behavior every time -- live-confirmed via a real read against "Admin Sheet
+  // Health-FINAL" returning "Retained records: 165 of 165" (0 collapsed) despite 23 real domain-duplicate
+  // groups. See spreadsheet-cleaning.test.ts's own detectDomainLevelDedupIntent coverage for the phrase-
+  // detection fix itself; this proves it flows through the full processSelectedGoogleSheet() pipeline.
+  it("REGRESSION (PDF-documented, live-reported): the project's own standard 'permanent duplicate-cleaning rules' invocation now actually collapses domain duplicates, not just flags them", async () => {
+    getSelectedSpreadsheetMock.mockResolvedValue({ id: "health-source-id", name: "Admin Sheet Health-FINAL" });
+    const rows = healthFixtureRows();
+    getAllSpreadsheetValuesMock.mockResolvedValue({ values: rows, rowsRead: rows.length - 1, batchesRead: 1, cappedAtSafetyLimit: false });
+    const userId = await createTestUser();
+
+    const result = await processSelectedGoogleSheet(
+      userId,
+      "Use ONLY the Google Sheets Integration Agent. Clean the selected Health Sheet using the permanent duplicate-cleaning rules. Return the proposal only. Do not write until I approve.",
+    );
+    expect(result.ok).toBe(true);
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+
+    // Same 6 -> 5 outcome as the explicit-phrasing REGRESSION test above: medicalnewstoday.com collapsed,
+    // linkedin.com (platform) untouched -- proving "the permanent rules" alone, with zero domain-dedup
+    // language, still applies the full permanent rule set (platform-exclusion included).
+    expect(result.reply).toContain("Retained records: 5");
+    expect(result.reply).toContain("EXCLUDED from domain-level collapsing");
+    expect(result.reply).not.toContain("flagged for your review, NOT automatically removed");
+
+    const persisted = JSON.parse(approval!.resultJson) as { retainedRows: string[][] };
+    const retainedUrls = persisted.retainedRows.map((r) => r[0]);
+    expect(retainedUrls).toContain("https://linkedin.com/posts/dr-jane-1");
+    expect(retainedUrls).toContain("https://linkedin.com/posts/dr-jane-2");
+    expect(retainedUrls.filter((u) => u?.includes("medicalnewstoday.com"))).toHaveLength(1);
+  });
+
   // REAL, LIVE-CONFIRMED PERMANENT-RULE GAP (2026-09-24, second report): the stated PERMANENT rule set also
   // requires "NEVER remove or overwrite any existing record with a deal/pricing data", "if a duplicate has
   // one protected deal/priced record, remove only the other duplicate", and "if both duplicates are
