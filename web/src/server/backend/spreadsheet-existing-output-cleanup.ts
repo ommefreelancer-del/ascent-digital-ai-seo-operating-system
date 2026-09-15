@@ -677,6 +677,16 @@ const DEDUP_ACTION_PHRASES = /\b(duplicate|duplicates|dedup|de-dup|remove\s+dupl
 // language a plain "remove duplicates" request does not use -- so the weaker default stays the default
 // unless the user is explicit about wanting domain-level collapsing too.
 const DOMAIN_LEVEL_DEDUP_PHRASES = /\bper\s+(website|domain)\b|\bone\s+(unique\s+)?record\s+per\b|\bone\s+(unique\s+)?row\s+per\b/i;
+// PLATFORM-EXCLUSION PHRASING (2026-09-21): a real, explicit request to leave known large multi-tenant
+// platform domains (KNOWN_LARGE_PLATFORM_DOMAINS above -- LinkedIn, Facebook, Quora, etc.) OUT of the
+// domain-level collapse, matching the real refinement this feature's own live Admin - Vendor run needed
+// (collapsing quora.com/facebook.com/linkedin.com to one row each discarded far more real, distinct prospect
+// pages than collapsing a genuine single-site domain like a repeatedly-listed guest-post blog). Mentioning
+// platform exclusion only makes sense together with domain-level collapse, so matching this phrase ALSO
+// implies dedupeByDomain below -- a bare "exclude platforms" with no other dedup language would otherwise be
+// a silent no-op (ProposeExistingOutputTabCleanupOptions.excludedDomains only matters when
+// dedupeDomainDuplicates is true).
+const PLATFORM_EXCLUSION_PHRASES = /\bexclud(e|ing)\b[^.?!]{0,60}\bplatform/i;
 
 /**
  * ROUTING TARGET DETECTION (2026-09-21): distinguishes a request to self-dedupe one of ADASOS's OWN
@@ -691,8 +701,10 @@ const DOMAIN_LEVEL_DEDUP_PHRASES = /\bper\s+(website|domain)\b|\bone\s+(unique\s
 export interface ExistingOutputTabSelfCleanupTargets {
   readonly adminVendor: boolean;
   readonly clientSheet: boolean;
-  /** true when the message explicitly asks for one record per domain/website -- see DOMAIN_LEVEL_DEDUP_PHRASES above. */
+  /** true when the message explicitly asks for one record per domain/website -- see DOMAIN_LEVEL_DEDUP_PHRASES above. Also true whenever excludePlatformDomains is true (see that field's own note). */
   readonly dedupeByDomain: boolean;
+  /** true when the message explicitly asks to exclude known large platform domains from the domain-level collapse -- see PLATFORM_EXCLUSION_PHRASES above. Only has any effect when dedupeByDomain is also true, which this always forces true when set. */
+  readonly excludePlatformDomains: boolean;
 }
 
 export function detectExistingOutputTabSelfCleanupRequest(message: string): ExistingOutputTabSelfCleanupTargets | null {
@@ -700,7 +712,9 @@ export function detectExistingOutputTabSelfCleanupRequest(message: string): Exis
   const clientSheet = CLIENT_SHEET_MENTION.test(message);
   if (!adminVendor && !clientSheet) return null;
   if (!DEDUP_ACTION_PHRASES.test(message)) return null;
-  return { adminVendor, clientSheet, dedupeByDomain: DOMAIN_LEVEL_DEDUP_PHRASES.test(message) };
+  const excludePlatformDomains = PLATFORM_EXCLUSION_PHRASES.test(message);
+  const dedupeByDomain = excludePlatformDomains || DOMAIN_LEVEL_DEDUP_PHRASES.test(message);
+  return { adminVendor, clientSheet, dedupeByDomain, excludePlatformDomains };
 }
 
 /**
@@ -715,7 +729,10 @@ export function detectExistingOutputTabSelfCleanupRequest(message: string): Exis
  */
 export async function proposeExistingOutputTabCleanupForChat(userId: string, targets: ExistingOutputTabSelfCleanupTargets): Promise<SpreadsheetProcessingResult> {
   const sheetName = targets.adminVendor ? ADMIN_VENDOR_SHEET_NAME : CLIENT_WEBSITES_SHEET_NAME;
-  const result = await proposeExistingOutputTabCleanup(userId, sheetName, { dedupeDomainDuplicates: targets.dedupeByDomain });
+  const result = await proposeExistingOutputTabCleanup(userId, sheetName, {
+    dedupeDomainDuplicates: targets.dedupeByDomain,
+    excludedDomains: targets.excludePlatformDomains ? KNOWN_LARGE_PLATFORM_DOMAINS : undefined,
+  });
   if (targets.adminVendor && targets.clientSheet && result.ok) {
     return {
       ...result,

@@ -35,11 +35,13 @@ vi.mock("@/server/google-sheets", async (importOriginal) => {
 
 const {
   proposeExistingOutputTabCleanup,
+  proposeExistingOutputTabCleanupForChat,
   writeApprovedExistingOutputTabCleanupToGoogleSheets,
   writeApprovedCleaningRespectingMode,
   detectExistingOutputTabSelfCleanupRequest,
   collapseDomainDuplicatesToOnePerDomain,
   EXISTING_OUTPUT_CLEANUP_FILE_TYPE,
+  KNOWN_LARGE_PLATFORM_DOMAINS,
 } = await import("../../../src/server/backend/spreadsheet-existing-output-cleanup");
 const { createPendingCleaningApproval, approveCleaningApproval } = await import("../../../src/server/backend/spreadsheet-cleaning-approval");
 const { ADMIN_VENDOR_SHEET_NAME, CLIENT_WEBSITES_SHEET_NAME } = await import("../../../src/server/backend/spreadsheet-business-schema");
@@ -81,15 +83,30 @@ async function createTestUser(): Promise<string> {
 
 describe("detectExistingOutputTabSelfCleanupRequest -- distinguishes a self-dedup request from every other Google Sheets message", () => {
   it("matches 'Admin - Vendor' + a dedup action phrase", () => {
-    expect(detectExistingOutputTabSelfCleanupRequest("Please remove duplicates from Admin - Vendor.")).toEqual({ adminVendor: true, clientSheet: false, dedupeByDomain: false });
+    expect(detectExistingOutputTabSelfCleanupRequest("Please remove duplicates from Admin - Vendor.")).toEqual({
+      adminVendor: true,
+      clientSheet: false,
+      dedupeByDomain: false,
+      excludePlatformDomains: false,
+    });
   });
 
   it("matches 'Client Sheet' + a dedup action phrase", () => {
-    expect(detectExistingOutputTabSelfCleanupRequest("Can you clean up duplicates in the Client Sheet tab?")).toEqual({ adminVendor: false, clientSheet: true, dedupeByDomain: false });
+    expect(detectExistingOutputTabSelfCleanupRequest("Can you clean up duplicates in the Client Sheet tab?")).toEqual({
+      adminVendor: false,
+      clientSheet: true,
+      dedupeByDomain: false,
+      excludePlatformDomains: false,
+    });
   });
 
   it("matches both tabs when both are mentioned", () => {
-    expect(detectExistingOutputTabSelfCleanupRequest("Are there still duplicates in Admin-Vendor and Client Sheet? Please remove them.")).toEqual({ adminVendor: true, clientSheet: true, dedupeByDomain: false });
+    expect(detectExistingOutputTabSelfCleanupRequest("Are there still duplicates in Admin-Vendor and Client Sheet? Please remove them.")).toEqual({
+      adminVendor: true,
+      clientSheet: true,
+      dedupeByDomain: false,
+      excludePlatformDomains: false,
+    });
   });
 
   it("sets dedupeByDomain true when the message explicitly asks for one record per website/domain", () => {
@@ -97,6 +114,25 @@ describe("detectExistingOutputTabSelfCleanupRequest -- distinguishes a self-dedu
       adminVendor: true,
       clientSheet: false,
       dedupeByDomain: true,
+      excludePlatformDomains: false,
+    });
+  });
+
+  it("sets excludePlatformDomains AND dedupeByDomain true when the message asks to exclude platform domains, even without separate 'per domain' phrasing", () => {
+    expect(detectExistingOutputTabSelfCleanupRequest("Clean up duplicates in Admin - Vendor, excluding large platform domains.")).toEqual({
+      adminVendor: true,
+      clientSheet: false,
+      dedupeByDomain: true,
+      excludePlatformDomains: true,
+    });
+  });
+
+  it("matches a differently-worded platform-exclusion request too ('exclude platforms')", () => {
+    expect(detectExistingOutputTabSelfCleanupRequest("Remove duplicates from Client Sheet, one record per domain, exclude platforms like LinkedIn and Facebook.")).toEqual({
+      adminVendor: false,
+      clientSheet: true,
+      dedupeByDomain: true,
+      excludePlatformDomains: true,
     });
   });
 
@@ -106,6 +142,79 @@ describe("detectExistingOutputTabSelfCleanupRequest -- distinguishes a self-dedu
 
   it("returns null when a tab is mentioned but there is no dedup/cleanup action language", () => {
     expect(detectExistingOutputTabSelfCleanupRequest("Please email the Client Sheet to the team.")).toBeNull();
+  });
+});
+
+describe("proposeExistingOutputTabCleanupForChat -- platform-exclusion wiring end to end (chat entry point)", () => {
+  it("a real chat message asking to exclude platform domains actually leaves KNOWN_LARGE_PLATFORM_DOMAINS rows untouched, via the full detect -> chat-dispatch -> propose pipeline", async () => {
+    getWriteDestinationSpreadsheetMock.mockResolvedValue({ id: "dest-1", name: "SaaS Website Master Database" });
+    getAllSpreadsheetValuesMock.mockResolvedValue({
+      values: [
+        ["Clean URL", "DA"],
+        ["https://linkedin.com/post-1", "40"], // known platform domain -- should be excluded from collapse
+        ["https://linkedin.com/post-2", "41"], // same domain, differing content -- should ALSO be kept
+        ["https://alpha.com/a", "40"], // non-platform domain -- kept (lowest of its group)
+        ["https://alpha.com/b", "41"], // non-platform domain -- removed by the collapse
+      ],
+      rowsRead: 4,
+      batchesRead: 1,
+      cappedAtSafetyLimit: false,
+    });
+    const userId = await createTestUser();
+
+    const message = "Clean up duplicates in Admin - Vendor, one record per domain, excluding large platform domains.";
+    const targets = detectExistingOutputTabSelfCleanupRequest(message);
+    expect(targets).toEqual({ adminVendor: true, clientSheet: false, dedupeByDomain: true, excludePlatformDomains: true });
+
+    const result = await proposeExistingOutputTabCleanupForChat(userId, targets!);
+
+    expect(result.ok).toBe(true);
+    expect(result.reply).toContain("EXCLUDED from domain-level collapsing");
+    expect(result.reply).toContain('Domain "linkedin.com"');
+    expect(result.approvalMeta?.retainedRowCount).toBe(3);
+
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+    const persistedResult = JSON.parse(approval!.resultJson) as CleaningResult;
+    expect(persistedResult.retainedRows).toEqual([
+      ["https://linkedin.com/post-1", "40"],
+      ["https://linkedin.com/post-2", "41"],
+      ["https://alpha.com/a", "40"],
+    ]);
+  });
+
+  it("without platform-exclusion phrasing, a plain 'one record per domain' chat request still collapses platform domains too -- confirms excludePlatformDomains is what actually toggles this, not a hidden default", async () => {
+    getWriteDestinationSpreadsheetMock.mockResolvedValue({ id: "dest-1", name: "SaaS Website Master Database" });
+    getAllSpreadsheetValuesMock.mockResolvedValue({
+      values: [
+        ["Clean URL", "DA"],
+        ["https://linkedin.com/post-1", "40"],
+        ["https://linkedin.com/post-2", "41"],
+      ],
+      rowsRead: 2,
+      batchesRead: 1,
+      cappedAtSafetyLimit: false,
+    });
+    const userId = await createTestUser();
+
+    const message = "Clean up duplicates in Client Sheet, one record per domain.";
+    const targets = detectExistingOutputTabSelfCleanupRequest(message);
+    expect(targets).toEqual({ adminVendor: false, clientSheet: true, dedupeByDomain: true, excludePlatformDomains: false });
+
+    const result = await proposeExistingOutputTabCleanupForChat(userId, targets!);
+
+    expect(result.ok).toBe(true);
+    expect(result.reply).not.toContain("EXCLUDED from domain-level collapsing");
+    expect(result.approvalMeta?.retainedRowCount).toBe(1);
+
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+  });
+
+  it("KNOWN_LARGE_PLATFORM_DOMAINS is a real, non-empty, exported list (the same one used by this wiring)", () => {
+    expect(KNOWN_LARGE_PLATFORM_DOMAINS.length).toBeGreaterThan(10);
+    expect(KNOWN_LARGE_PLATFORM_DOMAINS).toContain("linkedin.com");
+    expect(KNOWN_LARGE_PLATFORM_DOMAINS).toContain("facebook.com");
   });
 });
 
