@@ -293,3 +293,275 @@ export function buildCleaningAuditCsv(result: CleaningResult): string {
 
   return lines.join("");
 }
+
+// ===========================================================================================
+// DOMAIN-LEVEL DEDUP (2026-09-21, generalized 2026-09-24): buildCleaningResult()'s own
+// domainDuplicateGroups are deliberately never auto-removed above -- rows sharing a domain but differing in
+// other fields are "flagged for human review, NEVER auto-removed", correct for the general case, which has
+// no basis to guess which differing row is canonical. Some callers (an explicit user request for "one
+// record per domain/website") want a real, stronger policy instead: exactly one row per domain, kept
+// deterministically (never guessed) by taking the LOWEST original row index in each domain group -- the
+// same convention buildCleaningResult()'s own exact-duplicate pass already uses. Lives here (not in either
+// specific caller module) so BOTH the existing-output-tab self-cleanup flow
+// (spreadsheet-existing-output-cleanup.ts) and the source-sheet-into-destination flow
+// (google-sheets-cleaning.ts) share the exact same collapse logic, platform-domain list, and phrase
+// detection -- never two parallel implementations that could silently drift apart. (A direct import between
+// those two modules would form a circular dependency through spreadsheet-google-sheets-writeback.ts ->
+// google-sheets-cleaning.ts -- this module has no dependencies of its own beyond spreadsheet-reader.ts, so
+// it's a safe, neutral home for both.)
+//
+// GENERALIZED (2026-09-24): a real, live-confirmed production gap -- a request phrased as "clean the
+// selected Health source... apply one-record-per-domain cleanup, excluding large platform domains" reached
+// google-sheets-cleaning.ts's processSelectedGoogleSheet() (the source-into-destination flow), which had
+// never been wired to this collapse logic at all (only spreadsheet-existing-output-cleanup.ts's narrower,
+// "Admin - Vendor"/"Client Sheet"-only flow had it). detectDomainLevelDedupIntent() below is the SAME
+// detector both flows now call, so "one record per domain" is honored automatically regardless of which
+// flow a real request reaches.
+
+/**
+ * Curated, explicit, general-knowledge list of well-known large platforms -- NOT derived from which domains
+ * happened to repeat most in any one dataset (a real spam-scraped single site could also repeat hundreds of
+ * times and would wrongly look "large" by that measure alone). Deliberately excludes anything not
+ * confidently a well-known multi-tenant platform. Reviewable and extendable -- pass a different/extra set
+ * via CollapseDomainDuplicatesOptions.excludedDomains instead of editing this constant if a specific run
+ * needs different exclusions.
+ */
+export const KNOWN_LARGE_PLATFORM_DOMAINS: readonly string[] = [
+  "facebook.com",
+  "linkedin.com",
+  "instagram.com",
+  "twitter.com",
+  "x.com",
+  "pinterest.com",
+  "tumblr.com",
+  "youtube.com",
+  "reddit.com",
+  "quora.com",
+  "medium.com",
+  "github.com",
+  "scribd.com",
+  "slideshare.net",
+  "slideserve.com",
+  "wordpress.com",
+  "blogspot.com",
+  "sites.google.com",
+  "docs.google.com",
+  "academic.oup.com",
+  "tandfonline.com",
+  "onlinelibrary.wiley.com",
+  "upwork.com",
+  "fiverr.com",
+];
+
+export interface DomainDedupedCleaningResult {
+  /** The result BEFORE this pass -- exact-duplicate removal only, domain groups still just flagged. Kept so callers/report builders can still show the real, full duplicate-group data. */
+  readonly base: CleaningResult;
+  /** The result AFTER this pass -- retainedRowIndexes/retainedRows/manualReviewRowIndexes reflect exactly one row kept per domain, on top of the existing exact-duplicate removal. */
+  readonly result: CleaningResult;
+  /** The one row per domain group that was kept (for reporting -- always already present in base.retainedRowIndexes; see this function's own proof in its implementation comment). */
+  readonly domainDuplicateKeptRowIndexes: ReadonlySet<number>;
+  /** Every other row in a domain group -- removed by this pass (a row already removed by exact-duplicate collapse may appear here too; removing it again is a safe no-op). RAW group membership -- do NOT sum this size with exactDuplicateGroups' own row count for a headline total, since the two sets can overlap. Use domainDuplicateAdditionalRemovedRowIndexes below for a reconciling total instead. */
+  readonly domainDuplicateRemovedRowIndexes: ReadonlySet<number>;
+  /** The subset of domainDuplicateRemovedRowIndexes that were STILL present in base.retainedRowIndexes (i.e. not already removed by exact-duplicate collapse) -- the TRUE incremental number of rows this pass removes on top of exact-duplicate removal. By construction, exactDuplicateGroups' own removed-row count + this set's size + result.retainedRowIndexes.length always equals base.originalRowCount exactly -- this is the set to use for any reconciling summary total. */
+  readonly domainDuplicateAdditionalRemovedRowIndexes: ReadonlySet<number>;
+  /** Domain groups that were deliberately left alone (not collapsed) because their normalized domain is in excludedDomains -- still flagged, exactly like the default (no-collapse) mode, never removed. */
+  readonly excludedDomainGroups: readonly DomainDuplicateGroup[];
+}
+
+export interface CollapseDomainDuplicatesOptions {
+  /** Normalized domains (e.g. "linkedin.com") to leave alone -- their groups stay flagged-only, exactly like the default mode, never collapsed to one row. Case-insensitive; compared against the same normalizeDomain() output buildCleaningResult() already used to form the group. */
+  readonly excludedDomains?: ReadonlySet<string>;
+}
+
+export function collapseDomainDuplicatesToOnePerDomain(base: CleaningResult, options?: CollapseDomainDuplicatesOptions): DomainDedupedCleaningResult {
+  const excludedDomains = options?.excludedDomains;
+  const domainDuplicateKeptRowIndexes = new Set<number>();
+  const domainDuplicateRemovedRowIndexes = new Set<number>();
+  const excludedDomainGroups: DomainDuplicateGroup[] = [];
+  for (const group of base.domainDuplicateGroups) {
+    if (excludedDomains?.has(group.normalizedDomain)) {
+      excludedDomainGroups.push(group);
+      continue;
+    }
+    const sorted = [...group.rowIndexes].sort((a, b) => a - b);
+    const [keep, ...extras] = sorted;
+    // `keep` (the group's lowest original row index) is always already present in base.retainedRowIndexes:
+    // if it were part of an exact-duplicate group, it would also be the LOWEST member there (it's the
+    // lowest in the superset), so buildCleaningResult()'s own exact-duplicate pass would already have kept
+    // it, never removed it. This is why the filter below only ever needs to REMOVE indexes, never add one
+    // back.
+    if (keep !== undefined) domainDuplicateKeptRowIndexes.add(keep);
+    for (const i of extras) domainDuplicateRemovedRowIndexes.add(i);
+  }
+
+  // RECONCILIATION FIX (2026-09-21): a real, live-confirmed reporting defect -- a report built from
+  // exactDuplicateGroups' row count PLUS domainDuplicateRemovedRowIndexes.size did not sum to the real
+  // (originalRowCount - retainedRowIndexes.length) total, because domainDuplicateRemovedRowIndexes counts
+  // EVERY non-canonical group member regardless of whether exact-duplicate collapse already removed it --
+  // a row can be both an exact-duplicate extra and a domain-group member, so summing the two RAW counts
+  // double-counts it. domainDuplicateAdditionalRemovedRowIndexes below is the TRUE incremental set (members
+  // still present in base.retainedRowIndexes right before this pass), so exact-removed-count +
+  // domainDuplicateAdditionalRemovedRowIndexes.size + result.retainedRowIndexes.length always reconciles to
+  // exactly base.originalRowCount -- never approximately, by construction (retainedRowIndexes below is
+  // filtered from base.retainedRowIndexes using the exact same set).
+  const baseRetainedSet = new Set(base.retainedRowIndexes);
+  const domainDuplicateAdditionalRemovedRowIndexes = new Set([...domainDuplicateRemovedRowIndexes].filter((i) => baseRetainedSet.has(i)));
+
+  const retainedPairs = base.retainedRowIndexes
+    .map((rowIndex, position) => [rowIndex, base.retainedRows[position]!] as const)
+    .filter(([rowIndex]) => !domainDuplicateRemovedRowIndexes.has(rowIndex));
+  const retainedRowIndexes = retainedPairs.map(([rowIndex]) => rowIndex);
+  const retainedRows = retainedPairs.map(([, row]) => row);
+
+  const manualReviewSet = new Set<number>();
+  for (const flag of base.malformedUrlRows) manualReviewSet.add(flag.rowIndex);
+  for (const flag of base.incompleteRows) manualReviewSet.add(flag.rowIndex);
+  // Excluded domain groups were deliberately left uncollapsed -- still genuinely ambiguous (same domain,
+  // differing fields), so they stay flagged for manual review exactly like the default (no-collapse) mode.
+  for (const group of excludedDomainGroups) for (const i of group.rowIndexes) manualReviewSet.add(i);
+
+  const result: CleaningResult = {
+    ...base,
+    retainedRowIndexes,
+    retainedRows,
+    manualReviewRowIndexes: Array.from(manualReviewSet).sort((a, b) => a - b),
+  };
+
+  return { base, result, domainDuplicateKeptRowIndexes, domainDuplicateRemovedRowIndexes, domainDuplicateAdditionalRemovedRowIndexes, excludedDomainGroups };
+}
+
+const FULLY_DEDUPED_AUDIT_CSV_COLUMNS = ["Category", "Original Row (data row #, header excluded)", "Matching Row(s)", "Duplicate Type", "Normalized Domain/URL", "Reason", "Proposed Action", "Final Disposition"];
+
+/**
+ * A real, reviewable CSV cleaning audit for the full-domain-dedup mode -- structurally mirrors
+ * buildCleaningAuditCsv() above, but labels every non-canonical domain-duplicate row as REMOVED rather than
+ * "flagged for review", matching what this mode's write-back actually does -- EXCEPT for a group whose
+ * domain was excluded from collapsing (see collapseDomainDuplicatesToOnePerDomain's excludedDomains
+ * option), which is reported as flagged-for-review, matching what actually happened to it (nothing
+ * removed).
+ */
+export function buildFullyDedupedCleaningAuditCsv(base: CleaningResult, finalRetainedRowIndexes: ReadonlySet<number>, excludedDomains?: ReadonlySet<string>): string {
+  const lines: string[] = [csvRow(FULLY_DEDUPED_AUDIT_CSV_COLUMNS)];
+
+  for (const group of base.exactDuplicateGroups) {
+    const [keptIndex, ...removedIndexes] = group.rowIndexes;
+    for (const removedIndex of removedIndexes) {
+      lines.push(
+        csvRow([
+          "A_EXACT_DUPLICATE_REMOVED",
+          String(removedIndex + 1),
+          String(keptIndex! + 1),
+          "Exact duplicate",
+          "",
+          `Identical values in every column as data row ${keptIndex! + 1}.`,
+          "Remove -- one occurrence retained",
+          "Removed",
+        ]),
+      );
+    }
+  }
+
+  const domainFlaggedIndexes = new Set<number>();
+  for (const group of base.domainDuplicateGroups) {
+    const sorted = [...group.rowIndexes].sort((a, b) => a - b);
+    const [keptIndex, ...restIndexes] = sorted;
+    const isExcluded = excludedDomains?.has(group.normalizedDomain) ?? false;
+    if (isExcluded) {
+      for (const rowIndex of sorted) {
+        domainFlaggedIndexes.add(rowIndex);
+        lines.push(
+          csvRow([
+            "B_DOMAIN_DUPLICATE_FLAGGED",
+            String(rowIndex + 1),
+            sorted.filter((i) => i !== rowIndex).map((i) => i + 1).join(";"),
+            "Domain/URL duplicate",
+            group.normalizedDomain,
+            "Excluded from domain-level collapsing (known large platform domain) -- other fields differ.",
+            "Keep -- review manually",
+            "Retained (flagged for review)",
+          ]),
+        );
+      }
+      continue;
+    }
+    for (const rowIndex of restIndexes) {
+      lines.push(
+        csvRow([
+          "B_DOMAIN_DUPLICATE_REMOVED",
+          String(rowIndex + 1),
+          String(keptIndex! + 1),
+          "Domain/URL duplicate",
+          group.normalizedDomain,
+          `Same normalized domain as data row ${keptIndex! + 1} -- kept exactly one record per domain.`,
+          "Remove -- one unique record per domain retained",
+          "Removed",
+        ]),
+      );
+    }
+  }
+
+  const flaggedIndexes = new Set([...base.malformedUrlRows.map((f) => f.rowIndex), ...base.incompleteRows.map((f) => f.rowIndex), ...domainFlaggedIndexes]);
+  for (const flag of base.malformedUrlRows) {
+    lines.push(
+      csvRow([
+        "C_MALFORMED_OR_INCOMPLETE",
+        String(flag.rowIndex + 1),
+        "",
+        "Malformed URL",
+        flag.rawValue,
+        "Value does not parse as a real domain/URL.",
+        "Keep -- review manually",
+        finalRetainedRowIndexes.has(flag.rowIndex) ? "Retained (flagged for review)" : "Removed (domain/exact duplicate)",
+      ]),
+    );
+  }
+  for (const flag of base.incompleteRows) {
+    lines.push(
+      csvRow([
+        "C_MALFORMED_OR_INCOMPLETE",
+        String(flag.rowIndex + 1),
+        "",
+        "Incomplete record",
+        "",
+        flag.reason,
+        "Keep -- review manually",
+        finalRetainedRowIndexes.has(flag.rowIndex) ? "Retained (flagged for review)" : "Removed (domain/exact duplicate)",
+      ]),
+    );
+  }
+
+  for (const rowIndex of finalRetainedRowIndexes) {
+    if (!flaggedIndexes.has(rowIndex)) {
+      lines.push(csvRow(["D_VALID_RETAINED", String(rowIndex + 1), "", "", "", "No issues detected.", "Keep", "Retained"]));
+    }
+  }
+
+  return lines.join("");
+}
+
+const DOMAIN_LEVEL_DEDUP_PHRASES = /\bper[\s-]+(website|domain)\b|\bone[\s-]+(unique[\s-]+)?record[\s-]+per\b|\bone[\s-]+(unique[\s-]+)?row[\s-]+per\b/i;
+// PLATFORM-EXCLUSION PHRASING: a real, explicit request to leave known large multi-tenant platform domains
+// (KNOWN_LARGE_PLATFORM_DOMAINS above) OUT of the domain-level collapse. Mentioning platform exclusion only
+// makes sense together with domain-level collapse, so matching this phrase ALSO implies dedupeByDomain in
+// detectDomainLevelDedupIntent() below.
+const PLATFORM_EXCLUSION_PHRASES = /\bexclud(e|ing)\b[^.?!]{0,60}\bplatform/i;
+
+export interface DomainLevelDedupIntent {
+  /** true when the message explicitly asks for one record per domain/website -- see DOMAIN_LEVEL_DEDUP_PHRASES above. Also true whenever excludePlatformDomains is true. */
+  readonly dedupeByDomain: boolean;
+  /** true when the message explicitly asks to exclude known large platform domains from the domain-level collapse -- see PLATFORM_EXCLUSION_PHRASES above. Only has any effect when dedupeByDomain is also true, which this always forces true when set. */
+  readonly excludePlatformDomains: boolean;
+}
+
+/**
+ * REGRESSION-TESTED FIX (2026-09-24): the original version of these phrases required literal whitespace
+ * between words (\s+), so a real, live-confirmed request phrased as "one-record-per-domain" (hyphenated,
+ * exactly as a real user wrote it) never matched -- \s+ does not match a hyphen. Now tolerant of either
+ * separator ([\s-]+) throughout, so both "one record per domain" and "one-record-per-domain" match
+ * identically.
+ */
+export function detectDomainLevelDedupIntent(message: string): DomainLevelDedupIntent {
+  const excludePlatformDomains = PLATFORM_EXCLUSION_PHRASES.test(message);
+  const dedupeByDomain = excludePlatformDomains || DOMAIN_LEVEL_DEDUP_PHRASES.test(message);
+  return { dedupeByDomain, excludePlatformDomains };
+}

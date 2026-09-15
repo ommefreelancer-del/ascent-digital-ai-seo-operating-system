@@ -30,7 +30,7 @@ describe("workspace messages route -- dispatch reaches proposeExistingOutputTabC
 
   it("this branch is checked BEFORE the existing processSelectedGoogleSheet() branch, so a self-cleanup request is never intercepted by the source-into-destination flow", () => {
     const selfCleanupIdx = routeSource.indexOf("await proposeExistingOutputTabCleanupForChat(userId, targets)");
-    const sourceIntoDestinationIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId)");
+    const sourceIntoDestinationIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId, message)");
     expect(selfCleanupIdx).toBeGreaterThan(-1);
     expect(sourceIntoDestinationIdx).toBeGreaterThan(-1);
     expect(selfCleanupIdx).toBeLessThan(sourceIntoDestinationIdx);
@@ -39,18 +39,18 @@ describe("workspace messages route -- dispatch reaches proposeExistingOutputTabC
   it("the self-cleanup branch never calls processSpreadsheetAttachment or processSelectedGoogleSheet -- mutually exclusive with both, not layered on top of either", () => {
     const selfCleanupIdx = routeSource.indexOf("await proposeExistingOutputTabCleanupForChat(userId, targets)");
     const branchStart = routeSource.lastIndexOf("} else if (", selfCleanupIdx);
-    const branchEnd = routeSource.indexOf("await processSelectedGoogleSheet(userId)", selfCleanupIdx);
+    const branchEnd = routeSource.indexOf("await processSelectedGoogleSheet(userId, message)", selfCleanupIdx);
     expect(branchStart).toBeGreaterThan(-1);
     expect(branchEnd).toBeGreaterThan(branchStart);
     const selfCleanupBranchBody = routeSource.slice(branchStart, branchEnd);
     expect(selfCleanupBranchBody).not.toContain("processSpreadsheetAttachment(");
-    expect(selfCleanupBranchBody).not.toContain("await processSelectedGoogleSheet(userId)");
+    expect(selfCleanupBranchBody).not.toContain("await processSelectedGoogleSheet(userId, message)");
   });
 
   it("never sends spreadsheet rows through the LLM -- the self-cleanup branch's only model-adjacent variable is the compact chat reply text, never a raw-rows blob", () => {
     const selfCleanupIdx = routeSource.indexOf("await proposeExistingOutputTabCleanupForChat(userId, targets)");
     const branchStart = routeSource.lastIndexOf("} else if (", selfCleanupIdx);
-    const branchEnd = routeSource.indexOf("await processSelectedGoogleSheet(userId)", selfCleanupIdx);
+    const branchEnd = routeSource.indexOf("await processSelectedGoogleSheet(userId, message)", selfCleanupIdx);
     const selfCleanupBranchBody = routeSource.slice(branchStart, branchEnd);
     expect(selfCleanupBranchBody).not.toMatch(/generateSpecialistReply|Anthropic|Gemini/i);
   });

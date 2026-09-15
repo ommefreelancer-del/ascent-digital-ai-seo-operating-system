@@ -27,7 +27,17 @@
 
 import { db } from "@/server/db";
 import { getSelectedSpreadsheet, getAllSpreadsheetValues, getWriteDestinationSpreadsheet, listSpreadsheets, type AllSpreadsheetValuesResult } from "@/server/google-sheets";
-import { buildCleaningResult, buildCleaningAuditCsv, realignColumnShiftedRow, type CleaningResult } from "./spreadsheet-cleaning";
+import {
+  buildCleaningResult,
+  buildCleaningAuditCsv,
+  buildFullyDedupedCleaningAuditCsv,
+  realignColumnShiftedRow,
+  collapseDomainDuplicatesToOnePerDomain,
+  detectDomainLevelDedupIntent,
+  KNOWN_LARGE_PLATFORM_DOMAINS,
+  type CleaningResult,
+  type DomainDedupedCleaningResult,
+} from "./spreadsheet-cleaning";
 import {
   mapToFinalBusinessSchema,
   splitByOrganicTraffic,
@@ -171,7 +181,7 @@ export async function readWriteDestinationForDuplicateProtection(userId: string)
  * deletes, moves, or overwrites anything -- and never asks the user to paste/attach data ADASOS can
  * already read itself.
  */
-export async function processSelectedGoogleSheet(userId: string): Promise<SpreadsheetProcessingResult> {
+export async function processSelectedGoogleSheet(userId: string, message?: string): Promise<SpreadsheetProcessingResult> {
   const selected = await getSelectedSpreadsheet(userId);
   if (!selected) {
     return {
@@ -203,7 +213,23 @@ export async function processSelectedGoogleSheet(userId: string): Promise<Spread
   // malformed/incomplete detection. A repeated header row embedded mid-data is handled by
   // mapToFinalBusinessSchema()'s own isEmbeddedHeaderRow() filter below, exactly as it already is for
   // an uploaded multi-section export -- never a second, separate implementation for the live-sheet case.
-  const cleaningResult = buildCleaningResult(headers, rows);
+  const baseCleaningResult = buildCleaningResult(headers, rows);
+
+  // DOMAIN-LEVEL DEDUP (2026-09-24): a real, live-confirmed gap -- a request like "Remove exact duplicates
+  // and apply one-record-per-domain cleanup, excluding large platform domains" reached THIS flow (source
+  // sheet -> configured destination), not the existing-output-tab self-cleanup flow (which only recognizes
+  // "Admin - Vendor"/"Client Sheet" by name) -- and this flow never applied domain-level collapsing at all,
+  // only ever flagging domain duplicates for manual review. detectDomainLevelDedupIntent() (shared with
+  // that other flow, spreadsheet-cleaning.ts) and collapseDomainDuplicatesToOnePerDomain() close that gap
+  // here too, so "one record per domain" (and "excluding platform domains") is honored automatically
+  // whenever the request text asks for it, regardless of which flow the request reaches. Optional `message`
+  // (omitted by every pre-existing caller/test) preserves the exact prior default (exact-duplicate removal
+  // only, domain duplicates flagged) when absent.
+  const intent = message ? detectDomainLevelDedupIntent(message) : { dedupeByDomain: false, excludePlatformDomains: false };
+  const domainDedup: DomainDedupedCleaningResult | null = intent.dedupeByDomain
+    ? collapseDomainDuplicatesToOnePerDomain(baseCleaningResult, { excludedDomains: intent.excludePlatformDomains ? new Set(KNOWN_LARGE_PLATFORM_DOMAINS) : undefined })
+    : null;
+  const cleaningResult = domainDedup?.result ?? baseCleaningResult;
 
   const sourceRecord = await db.attachment.create({
     data: {
@@ -237,12 +263,14 @@ export async function processSelectedGoogleSheet(userId: string): Promise<Spread
     { name: ADMIN_VENDOR_SHEET_NAME, headers: trafficSplit.adminVendor.headers, rows: trafficSplit.adminVendor.rows, columnWidths: BUSINESS_SCHEMA_COLUMN_WIDTHS, wrapTextColumns: BUSINESS_SCHEMA_WRAP_TEXT_COLUMNS },
     { name: CLIENT_WEBSITES_SHEET_NAME, headers: trafficSplit.clientWebsites.headers, rows: trafficSplit.clientWebsites.rows, columnWidths: BUSINESS_SCHEMA_COLUMN_WIDTHS, wrapTextColumns: BUSINESS_SCHEMA_WRAP_TEXT_COLUMNS },
   ]);
-  const auditCsv = buildCleaningAuditCsv(cleaningResult);
+  const auditCsv = domainDedup
+    ? buildFullyDedupedCleaningAuditCsv(domainDedup.base, new Set(domainDedup.result.retainedRowIndexes), intent.excludePlatformDomains ? new Set(KNOWN_LARGE_PLATFORM_DOMAINS) : undefined)
+    : buildCleaningAuditCsv(cleaningResult);
   await saveCleaningArtifacts(approval.id, cleanedWorkbook, auditCsv);
 
   return {
     ok: true,
-    reply: buildLiveSheetCleaningReportForChat(selected.name, readResult, cleaningResult, trafficSplit.clientWebsites.rows.length, approval, destinationOutcome, destinationProtection),
+    reply: buildLiveSheetCleaningReportForChat(selected.name, readResult, cleaningResult, trafficSplit.clientWebsites.rows.length, approval, destinationOutcome, destinationProtection, domainDedup),
     approvalMeta: buildSpreadsheetCleaningApprovalMeta(selected.name, approval),
   };
 }
@@ -263,6 +291,7 @@ function buildLiveSheetCleaningReportForChat(
   approval: CleaningApprovalRecord,
   destinationOutcome: DestinationReadOutcome,
   destinationProtection: DestinationProtectionResult | null,
+  domainDedup: DomainDedupedCleaningResult | null = null,
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -276,32 +305,83 @@ function buildLiveSheetCleaningReportForChat(
     );
   }
 
-  const exactDuplicateRowTotal = result.exactDuplicateGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+  // DOMAIN-LEVEL DEDUP (2026-09-24): when the user's own message asked for "one record per domain" (see
+  // detectDomainLevelDedupIntent() in spreadsheet-cleaning.ts), `result` here is ALREADY the collapsed
+  // result (domainDedup.result) -- `domainDedup.base` is the exact-dedup-only result underneath it, needed
+  // to report the real, raw domain-duplicate-group data (which domains, which rows) the collapse acted on.
+  // The default (domainDedup === null) branches below are BYTE-IDENTICAL to this function's prior behavior.
+  const base = domainDedup?.base ?? result;
+  const exactDuplicateRawMemberTotal = base.exactDuplicateGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+  const exactDuplicateActualRemovedCount = exactDuplicateRawMemberTotal - base.exactDuplicateGroups.length;
   const removedCount = result.originalRowCount - result.retainedRowIndexes.length;
-  const domainDuplicateRowTotal = result.domainDuplicateGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+  const domainDuplicateRowTotal = base.domainDuplicateGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
 
   lines.push("");
   lines.push("=== A. CLEAN DATASET ===");
   lines.push(`Columns (${result.headers.length}): ${result.headers.join(", ")}`);
-  lines.push(`Retained records: ${result.retainedRowIndexes.length} (of ${result.originalRowCount} original data rows -- ${removedCount} exact-duplicate row(s) removed, everything else preserved).`);
+  if (domainDedup) {
+    const domainDuplicateAdditionalRemovedTotal = domainDedup.domainDuplicateAdditionalRemovedRowIndexes.size;
+    lines.push(
+      `Retained records: ${result.retainedRowIndexes.length} (of ${result.originalRowCount} original data rows -- ${removedCount} row(s) removed: ` +
+        `${exactDuplicateActualRemovedCount} exact-duplicate row(s), plus ${domainDuplicateAdditionalRemovedTotal} additional row(s) removed to keep exactly ONE record per website/domain` +
+        (domainDedup.excludedDomainGroups.length > 0 ? `, excluding ${domainDedup.excludedDomainGroups.length} known large platform domain(s) -- see below` : "") +
+        ").",
+    );
+    lines.push(
+      'Selection rule for which row is kept per domain: the row with the LOWEST original row number in this sheet (same convention already used for exact duplicates) -- never a guess based on which row "looks more complete".',
+    );
+  } else {
+    lines.push(`Retained records: ${result.retainedRowIndexes.length} (of ${result.originalRowCount} original data rows -- ${removedCount} exact-duplicate row(s) removed, everything else preserved).`);
+  }
   lines.push("A real, downloadable cleaned workbook and a CSV cleaning audit are attached to this message below -- review both before deciding.");
 
   lines.push("");
   lines.push("=== B. DUPLICATE AUDIT ===");
-  if (result.exactDuplicateGroups.length === 0) {
+  if (base.exactDuplicateGroups.length === 0) {
     lines.push("Exact duplicates: none found.");
   } else {
-    lines.push(`Exact duplicates: ${result.exactDuplicateGroups.length} group(s), ${exactDuplicateRowTotal} row(s) total -- one canonical occurrence kept per group, the rest removed.`);
-    for (const group of result.exactDuplicateGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
+    lines.push(`Exact duplicates: ${base.exactDuplicateGroups.length} group(s), ${exactDuplicateRawMemberTotal} row(s) total -- one canonical occurrence kept per group, the rest removed.`);
+    for (const group of base.exactDuplicateGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
       const [keepRow, ...removedRows] = group.rowIndexes.map((i) => i + 1);
       lines.push(`  - Kept data row ${keepRow}; removed data row(s) ${removedRows.join(", ")} -- reason: identical values in every column.`);
     }
-    if (result.exactDuplicateGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
-      lines.push(`  ...and ${result.exactDuplicateGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more exact-duplicate group(s).`);
+    if (base.exactDuplicateGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
+      lines.push(`  ...and ${base.exactDuplicateGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more exact-duplicate group(s).`);
     }
   }
   lines.push("");
-  if (result.domainDuplicateGroups.length === 0) {
+  if (domainDedup) {
+    const collapsedGroups = base.domainDuplicateGroups.filter((g) => !domainDedup.excludedDomainGroups.includes(g));
+    if (collapsedGroups.length === 0) {
+      lines.push("Domain/URL duplicate candidates collapsed to one record per domain: none.");
+    } else {
+      lines.push(
+        `Domain/URL duplicate candidates: ${collapsedGroups.length} group(s), ${domainDedup.domainDuplicateAdditionalRemovedRowIndexes.size} row(s) REMOVED (one unique record kept per domain):`,
+      );
+      for (const group of collapsedGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
+        const sorted = [...group.rowIndexes].sort((a, b) => a - b);
+        const [keepRow, ...removedRows] = sorted.map((i) => i + 1);
+        lines.push(`  - Domain "${group.normalizedDomain}": keep data row ${keepRow}; remove data row(s) ${removedRows.join(", ")}.`);
+      }
+      if (collapsedGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
+        lines.push(`  ...and ${collapsedGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more domain-duplicate group(s) -- see the attached audit CSV for the complete list.`);
+      }
+    }
+    if (domainDedup.excludedDomainGroups.length > 0) {
+      const excludedRowTotal = domainDedup.excludedDomainGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+      lines.push("");
+      lines.push(
+        `EXCLUDED from domain-level collapsing (known large platform domains -- every row kept, only flagged for review, exactly like the default mode): ` +
+          `${domainDedup.excludedDomainGroups.length} domain(s), ${excludedRowTotal} row(s) total.`,
+      );
+      for (const group of domainDedup.excludedDomainGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
+        lines.push(`  - Domain "${group.normalizedDomain}": data row(s) ${group.rowIndexes.map((i) => i + 1).join(", ")} -- all retained.`);
+      }
+      if (domainDedup.excludedDomainGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
+        lines.push(`  ...and ${domainDedup.excludedDomainGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more excluded domain(s) -- see the attached audit CSV for the complete list.`);
+      }
+    }
+  } else if (result.domainDuplicateGroups.length === 0) {
     lines.push("Domain/URL duplicate candidates (same normalized domain, other fields differ -- flagged for review, NOT removed): none found.");
   } else {
     lines.push(`Domain/URL duplicate candidates: ${result.domainDuplicateGroups.length} group(s), ${domainDuplicateRowTotal} row(s) total -- flagged for your review, NOT automatically removed:`);
@@ -311,6 +391,22 @@ function buildLiveSheetCleaningReportForChat(
     if (result.domainDuplicateGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
       lines.push(`  ...and ${result.domainDuplicateGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more domain-duplicate group(s).`);
     }
+  }
+
+  if (domainDedup) {
+    const domainDuplicateAdditionalRemovedTotal = domainDedup.domainDuplicateAdditionalRemovedRowIndexes.size;
+    const totalRemoved = exactDuplicateActualRemovedCount + domainDuplicateAdditionalRemovedTotal;
+    lines.push("");
+    lines.push("=== RECONCILIATION (rows read = removed + retained, exactly) ===");
+    lines.push(`Rows read:                                            ${base.originalRowCount}`);
+    lines.push(`Exact-duplicate removals (extras only, one kept per group):     ${exactDuplicateActualRemovedCount}`);
+    lines.push(`Domain-duplicate removals (additional -- excludes overlap with exact-duplicate removals above): ${domainDuplicateAdditionalRemovedTotal}`);
+    lines.push(`Total removed:                                        ${totalRemoved}  (= ${exactDuplicateActualRemovedCount} + ${domainDuplicateAdditionalRemovedTotal})`);
+    lines.push(`Retained rows:                                        ${result.retainedRowIndexes.length}`);
+    lines.push(
+      `Check: ${totalRemoved} removed + ${result.retainedRowIndexes.length} retained = ${totalRemoved + result.retainedRowIndexes.length} -- ` +
+        `${totalRemoved + result.retainedRowIndexes.length === base.originalRowCount ? "MATCHES rows read." : "DOES NOT MATCH rows read -- this would be a real defect."}`,
+    );
   }
 
   lines.push("");
@@ -335,9 +431,20 @@ function buildLiveSheetCleaningReportForChat(
 
   lines.push("");
   lines.push("=== E. SUMMARY ===");
-  lines.push(`Original data rows read (server-side, complete): ${result.originalRowCount}`);
-  lines.push(`Exact duplicate rows removed: ${exactDuplicateRowTotal} (in ${result.exactDuplicateGroups.length} group(s))`);
-  lines.push(`Domain/URL duplicate candidates flagged: ${domainDuplicateRowTotal} (in ${result.domainDuplicateGroups.length} group(s))`);
+  if (domainDedup) {
+    // Corrected, reconciling counts -- only for this new reporting path (see the RECONCILIATION section
+    // above). The default path below is left byte-identical to this function's prior behavior.
+    lines.push(`Original data rows read (server-side, complete): ${base.originalRowCount}`);
+    lines.push(`Exact duplicate rows removed: ${exactDuplicateActualRemovedCount} (in ${base.exactDuplicateGroups.length} group(s))`);
+    lines.push(`Domain/URL duplicate rows removed (one record per domain): ${domainDedup.domainDuplicateAdditionalRemovedRowIndexes.size} (in ${base.domainDuplicateGroups.length - domainDedup.excludedDomainGroups.length} group(s))`);
+    if (domainDedup.excludedDomainGroups.length > 0) {
+      lines.push(`Domain/URL duplicate rows flagged (known platform domains, excluded from collapse): ${domainDedup.excludedDomainGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0)} (in ${domainDedup.excludedDomainGroups.length} group(s))`);
+    }
+  } else {
+    lines.push(`Original data rows read (server-side, complete): ${result.originalRowCount}`);
+    lines.push(`Exact duplicate rows removed: ${exactDuplicateRawMemberTotal} (in ${result.exactDuplicateGroups.length} group(s))`);
+    lines.push(`Domain/URL duplicate candidates flagged: ${domainDuplicateRowTotal} (in ${result.domainDuplicateGroups.length} group(s))`);
+  }
   lines.push(`Final retained records: ${result.retainedRowIndexes.length}`);
   lines.push(`Records requiring manual review: ${result.manualReviewRowIndexes.length}`);
 

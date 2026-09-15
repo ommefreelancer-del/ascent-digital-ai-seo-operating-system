@@ -35,7 +35,16 @@
 import { db } from "@/server/db";
 import { getAllSpreadsheetValues, getWriteDestinationSpreadsheet, clearAndReplaceSheetValues, assertSheetsWriteScope, type AllSpreadsheetValuesResult } from "@/server/google-sheets";
 import { getAttachmentMeta } from "./attachments";
-import { buildCleaningResult, buildCleaningAuditCsv, type CleaningResult, type DomainDuplicateGroup } from "./spreadsheet-cleaning";
+import {
+  buildCleaningResult,
+  buildCleaningAuditCsv,
+  buildFullyDedupedCleaningAuditCsv,
+  collapseDomainDuplicatesToOnePerDomain,
+  detectDomainLevelDedupIntent,
+  KNOWN_LARGE_PLATFORM_DOMAINS,
+  type CleaningResult,
+  type DomainDedupedCleaningResult,
+} from "./spreadsheet-cleaning";
 import { buildXlsxWorkbook } from "./xlsx-writer";
 import { createPendingCleaningApproval } from "./spreadsheet-cleaning-approval";
 import { saveCleaningArtifacts } from "./spreadsheet-cleaning-artifacts";
@@ -44,267 +53,17 @@ import { writeApprovedCleaningToGoogleSheets, type WriteBackResult } from "./spr
 import { markCleaningApprovalWritten, markCleaningApprovalWriteFailed, type CleaningApprovalRecord } from "./spreadsheet-cleaning-approval";
 import { ADMIN_VENDOR_SHEET_NAME, CLIENT_WEBSITES_SHEET_NAME } from "./spreadsheet-business-schema";
 
-/**
- * FULL DOMAIN DEDUP (2026-09-21): a real, explicitly-requested extension -- buildCleaningResult()'s own
- * domainDuplicateGroups are deliberately never auto-removed (see spreadsheet-cleaning.ts's own header: rows
- * sharing a domain but differing in other fields are "flagged for human review, NEVER auto-removed" --
- * correct for the general uploaded-file/source-into-destination flows, which have no basis to guess which
- * differing row is canonical). For THIS feature specifically (self-cleanup of a tab ADASOS itself already
- * wrote), the user explicitly asked for a stronger policy: exactly one row per website/domain. This is kept
- * OUT of the shared spreadsheet-cleaning.ts engine (never changes buildCleaningResult()'s behavior for any
- * other caller -- Health Master source cleaning, XLSX-attachment cleaning, etc. all stay exactly as they
- * were) and lives here, as an explicit, opt-in second pass applied on top of the already-computed result.
- *
- * Selection rule, stated plainly (never silently guessed): within each domain-duplicate group, the row with
- * the LOWEST original data-row index is kept as the canonical record; every other row sharing that
- * normalized domain is removed. This mirrors the exact-duplicate engine's own established convention
- * (buildCleaningResult() already keeps the lowest-indexed row of an exact-duplicate group) rather than
- * inventing a new, unstated rule (e.g. "highest DA" or "most complete row") that would require guessing
- * which field matters most.
- */
-export interface DomainDedupedCleaningResult {
-  /** The result BEFORE this pass -- exact-duplicate removal only, domain groups still just flagged. Kept so callers/report builders can still show the real, full duplicate-group data. */
-  readonly base: CleaningResult;
-  /** The result AFTER this pass -- retainedRowIndexes/retainedRows/manualReviewRowIndexes reflect exactly one row kept per domain, on top of the existing exact-duplicate removal. */
-  readonly result: CleaningResult;
-  /** The one row per domain group that was kept (for reporting -- always already present in base.retainedRowIndexes; see this function's own proof in its implementation comment). */
-  readonly domainDuplicateKeptRowIndexes: ReadonlySet<number>;
-  /** Every other row in a domain group -- removed by this pass (a row already removed by exact-duplicate collapse may appear here too; removing it again is a safe no-op). RAW group membership -- do NOT sum this size with exactDuplicateGroups' own row count for a headline total, since the two sets can overlap (a row can be both an exact-duplicate extra AND a non-canonical domain-group member). Use domainDuplicateAdditionalRemovedRowIndexes below for a reconciling total instead. */
-  readonly domainDuplicateRemovedRowIndexes: ReadonlySet<number>;
-  /** The subset of domainDuplicateRemovedRowIndexes that were STILL present in base.retainedRowIndexes (i.e. not already removed by exact-duplicate collapse) -- the TRUE incremental number of rows this pass removes on top of exact-duplicate removal. By construction, exactDuplicateGroups' own removed-row count + this set's size + result.retainedRowIndexes.length always equals base.originalRowCount exactly -- this is the set to use for any reconciling summary total. */
-  readonly domainDuplicateAdditionalRemovedRowIndexes: ReadonlySet<number>;
-  /** Domain groups that were deliberately left alone (not collapsed) because their normalized domain is in excludedDomains -- still flagged, exactly like the default (no-collapse) mode, never removed. */
-  readonly excludedDomainGroups: readonly DomainDuplicateGroup[];
-}
-
-export interface CollapseDomainDuplicatesOptions {
-  /** Normalized domains (e.g. "linkedin.com") to leave alone -- their groups stay flagged-only, exactly like the default mode, never collapsed to one row. Case-insensitive; compared against the same normalizeDomain() output buildCleaningResult() already used to form the group. */
-  readonly excludedDomains?: ReadonlySet<string>;
-}
-
-export function collapseDomainDuplicatesToOnePerDomain(base: CleaningResult, options?: CollapseDomainDuplicatesOptions): DomainDedupedCleaningResult {
-  const excludedDomains = options?.excludedDomains;
-  const domainDuplicateKeptRowIndexes = new Set<number>();
-  const domainDuplicateRemovedRowIndexes = new Set<number>();
-  const excludedDomainGroups: DomainDuplicateGroup[] = [];
-  for (const group of base.domainDuplicateGroups) {
-    if (excludedDomains?.has(group.normalizedDomain)) {
-      excludedDomainGroups.push(group);
-      continue;
-    }
-    const sorted = [...group.rowIndexes].sort((a, b) => a - b);
-    const [keep, ...extras] = sorted;
-    // `keep` (the group's lowest original row index) is always already present in base.retainedRowIndexes:
-    // if it were part of an exact-duplicate group, it would also be the LOWEST member there (it's the
-    // lowest in the superset), so buildCleaningResult()'s own exact-duplicate pass would already have kept
-    // it, never removed it. This is why the filter below only ever needs to REMOVE indexes, never add one
-    // back.
-    if (keep !== undefined) domainDuplicateKeptRowIndexes.add(keep);
-    for (const i of extras) domainDuplicateRemovedRowIndexes.add(i);
-  }
-
-  // RECONCILIATION FIX (2026-09-21): a real, live-confirmed reporting defect -- a report built from
-  // exactDuplicateGroups' row count PLUS domainDuplicateRemovedRowIndexes.size did not sum to the real
-  // (originalRowCount - retainedRowIndexes.length) total, because domainDuplicateRemovedRowIndexes counts
-  // EVERY non-canonical group member regardless of whether exact-duplicate collapse already removed it --
-  // a row can be both an exact-duplicate extra and a domain-group member, so summing the two RAW counts
-  // double-counts it. domainDuplicateAdditionalRemovedRowIndexes below is the TRUE incremental set (members
-  // still present in base.retainedRowIndexes right before this pass), so exact-removed-count +
-  // domainDuplicateAdditionalRemovedRowIndexes.size + result.retainedRowIndexes.length always reconciles to
-  // exactly base.originalRowCount -- never approximately, by construction (retainedRowIndexes below is
-  // filtered from base.retainedRowIndexes using the exact same set).
-  const baseRetainedSet = new Set(base.retainedRowIndexes);
-  const domainDuplicateAdditionalRemovedRowIndexes = new Set([...domainDuplicateRemovedRowIndexes].filter((i) => baseRetainedSet.has(i)));
-
-  const retainedPairs = base.retainedRowIndexes
-    .map((rowIndex, position) => [rowIndex, base.retainedRows[position]!] as const)
-    .filter(([rowIndex]) => !domainDuplicateRemovedRowIndexes.has(rowIndex));
-  const retainedRowIndexes = retainedPairs.map(([rowIndex]) => rowIndex);
-  const retainedRows = retainedPairs.map(([, row]) => row);
-
-  const manualReviewSet = new Set<number>();
-  for (const flag of base.malformedUrlRows) manualReviewSet.add(flag.rowIndex);
-  for (const flag of base.incompleteRows) manualReviewSet.add(flag.rowIndex);
-  // Excluded domain groups were deliberately left uncollapsed -- still genuinely ambiguous (same domain,
-  // differing fields), so they stay flagged for manual review exactly like the default (no-collapse) mode.
-  for (const group of excludedDomainGroups) for (const i of group.rowIndexes) manualReviewSet.add(i);
-
-  const result: CleaningResult = {
-    ...base,
-    retainedRowIndexes,
-    retainedRows,
-    manualReviewRowIndexes: Array.from(manualReviewSet).sort((a, b) => a - b),
-  };
-
-  return { base, result, domainDuplicateKeptRowIndexes, domainDuplicateRemovedRowIndexes, domainDuplicateAdditionalRemovedRowIndexes, excludedDomainGroups };
-}
-
-const FULLY_DEDUPED_AUDIT_CSV_COLUMNS = ["Category", "Original Row (data row #, header excluded)", "Matching Row(s)", "Duplicate Type", "Normalized Domain/URL", "Reason", "Proposed Action", "Final Disposition"];
-
-function csvEscapeLocal(value: string): string {
-  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
-function csvRowLocal(fields: readonly string[]): string {
-  return `${fields.map(csvEscapeLocal).join(",")}\r\n`;
-}
-
-/**
- * A real, reviewable CSV cleaning audit for the full-domain-dedup mode -- structurally mirrors
- * spreadsheet-cleaning.ts's buildCleaningAuditCsv(), but (unlike that shared function, which is never
- * changed here) labels every non-canonical domain-duplicate row as REMOVED rather than "flagged for
- * review", matching what this mode's write-back actually does -- EXCEPT for a group whose domain was
- * excluded from collapsing (see collapseDomainDuplicatesToOnePerDomain's excludedDomains option), which is
- * reported as flagged-for-review, matching what actually happened to it (nothing removed).
- */
-function buildFullyDedupedCleaningAuditCsv(base: CleaningResult, finalRetainedRowIndexes: ReadonlySet<number>, excludedDomains?: ReadonlySet<string>): string {
-  const lines: string[] = [csvRowLocal(FULLY_DEDUPED_AUDIT_CSV_COLUMNS)];
-
-  for (const group of base.exactDuplicateGroups) {
-    const [keptIndex, ...removedIndexes] = group.rowIndexes;
-    for (const removedIndex of removedIndexes) {
-      lines.push(
-        csvRowLocal([
-          "A_EXACT_DUPLICATE_REMOVED",
-          String(removedIndex + 1),
-          String(keptIndex! + 1),
-          "Exact duplicate",
-          "",
-          `Identical values in every column as data row ${keptIndex! + 1}.`,
-          "Remove -- one occurrence retained",
-          "Removed",
-        ]),
-      );
-    }
-  }
-
-  const domainFlaggedIndexes = new Set<number>();
-  for (const group of base.domainDuplicateGroups) {
-    const sorted = [...group.rowIndexes].sort((a, b) => a - b);
-    const [keptIndex, ...restIndexes] = sorted;
-    const isExcluded = excludedDomains?.has(group.normalizedDomain) ?? false;
-    if (isExcluded) {
-      // Nothing in this group was removed -- report EVERY member as flagged (matching the shared engine's
-      // own default convention), not just the non-canonical ones, so none silently falls through to
-      // D_VALID_RETAINED as if it had no duplicate concern at all.
-      for (const rowIndex of sorted) {
-        domainFlaggedIndexes.add(rowIndex);
-        lines.push(
-          csvRowLocal([
-            "B_DOMAIN_DUPLICATE_FLAGGED",
-            String(rowIndex + 1),
-            sorted.filter((i) => i !== rowIndex).map((i) => i + 1).join(";"),
-            "Domain/URL duplicate",
-            group.normalizedDomain,
-            "Excluded from domain-level collapsing (known large platform domain) -- other fields differ.",
-            "Keep -- review manually",
-            "Retained (flagged for review)",
-          ]),
-        );
-      }
-      continue;
-    }
-    for (const rowIndex of restIndexes) {
-      lines.push(
-        csvRowLocal([
-          "B_DOMAIN_DUPLICATE_REMOVED",
-          String(rowIndex + 1),
-          String(keptIndex! + 1),
-          "Domain/URL duplicate",
-          group.normalizedDomain,
-          `Same normalized domain as data row ${keptIndex! + 1} -- kept exactly one record per domain.`,
-          "Remove -- one unique record per domain retained",
-          "Removed",
-        ]),
-      );
-    }
-  }
-
-  const flaggedIndexes = new Set([...base.malformedUrlRows.map((f) => f.rowIndex), ...base.incompleteRows.map((f) => f.rowIndex), ...domainFlaggedIndexes]);
-  for (const flag of base.malformedUrlRows) {
-    lines.push(
-      csvRowLocal([
-        "C_MALFORMED_OR_INCOMPLETE",
-        String(flag.rowIndex + 1),
-        "",
-        "Malformed URL",
-        flag.rawValue,
-        "Value does not parse as a real domain/URL.",
-        "Keep -- review manually",
-        finalRetainedRowIndexes.has(flag.rowIndex) ? "Retained (flagged for review)" : "Removed (domain/exact duplicate)",
-      ]),
-    );
-  }
-  for (const flag of base.incompleteRows) {
-    lines.push(
-      csvRowLocal([
-        "C_MALFORMED_OR_INCOMPLETE",
-        String(flag.rowIndex + 1),
-        "",
-        "Incomplete record",
-        "",
-        flag.reason,
-        "Keep -- review manually",
-        finalRetainedRowIndexes.has(flag.rowIndex) ? "Retained (flagged for review)" : "Removed (domain/exact duplicate)",
-      ]),
-    );
-  }
-
-  for (const rowIndex of finalRetainedRowIndexes) {
-    if (!flaggedIndexes.has(rowIndex)) {
-      lines.push(csvRowLocal(["D_VALID_RETAINED", String(rowIndex + 1), "", "", "", "No issues detected.", "Keep", "Retained"]));
-    }
-  }
-
-  return lines.join("");
-}
+// DOMAIN-LEVEL DEDUP (2026-09-21, RELOCATED 2026-09-24): collapseDomainDuplicatesToOnePerDomain(),
+// KNOWN_LARGE_PLATFORM_DOMAINS, buildFullyDedupedCleaningAuditCsv(), and detectDomainLevelDedupIntent() now
+// live in spreadsheet-cleaning.ts (a dependency-free shared module), so google-sheets-cleaning.ts's
+// source-into-destination flow can use the EXACT same collapse logic and phrase detection this
+// existing-output-tab flow already used -- a real, live-confirmed gap where "one record per domain" was
+// only ever honored by THIS flow, never the other one. Re-exported here so every existing import site in
+// this codebase (tests, route.ts) keeps working unchanged.
+export { collapseDomainDuplicatesToOnePerDomain, KNOWN_LARGE_PLATFORM_DOMAINS, type DomainDedupedCleaningResult };
 
 /** Distinct from the existing "google-sheet" marker (source-into-destination live cleaning) -- lets writeApprovedCleaningRespectingMode() below tell the two write behaviors apart from the approval's own Attachment row, with no schema change. */
 export const EXISTING_OUTPUT_CLEANUP_FILE_TYPE = "google-sheet-existing-tab-cleanup";
-
-/**
- * PLATFORM-DOMAIN EXCLUSION (2026-09-21): a real, explicitly-requested refinement -- the first full-domain
- * -dedup run against real "Admin - Vendor" data showed its biggest reductions came from large,
- * general-purpose multi-tenant platforms (quora.com, facebook.com, linkedin.com, ...), where many DIFFERENT
- * individual pages on the same domain (a specific Quora question, a specific LinkedIn post) were captured as
- * separate, legitimate prospect rows -- collapsing those to one row per domain is a materially different,
- * likely-unwanted outcome compared to a genuine single-site domain like a guest-post blog listed repeatedly.
- *
- * This is a curated, explicit, general-knowledge list of well-known large platforms -- NOT derived from
- * which domains happened to repeat most in any one dataset (that would be circular: a real spam-scraped
- * single site could also repeat hundreds of times and would wrongly look "large" by that measure alone).
- * Deliberately excludes anything not confidently a well-known multi-tenant platform (e.g. a smaller SaaS/
- * tool site that merely repeated often in one real run) -- those stay subject to normal domain-level
- * collapsing rather than being silently guessed into this list. Reviewable and extendable -- pass a
- * different/extra set via ProposeExistingOutputTabCleanupOptions.excludedDomains instead of editing this
- * constant if a specific run needs different exclusions.
- */
-export const KNOWN_LARGE_PLATFORM_DOMAINS: readonly string[] = [
-  "facebook.com",
-  "linkedin.com",
-  "instagram.com",
-  "twitter.com",
-  "x.com",
-  "pinterest.com",
-  "tumblr.com",
-  "youtube.com",
-  "reddit.com",
-  "quora.com",
-  "medium.com",
-  "github.com",
-  "scribd.com",
-  "slideshare.net",
-  "slideserve.com",
-  "wordpress.com",
-  "blogspot.com",
-  "sites.google.com",
-  "docs.google.com",
-  "academic.oup.com",
-  "tandfonline.com",
-  "onlinelibrary.wiley.com",
-  "upwork.com",
-  "fiverr.com",
-];
 
 /** Same honesty convention as every other ceiling in this codebase -- a real, large existing output tab must never be silently truncated. */
 const MAX_ROWS_FOR_EXISTING_TAB_READ = 200_000;
@@ -671,22 +430,6 @@ export async function writeApprovedCleaningRespectingMode(userId: string, approv
 const ADMIN_VENDOR_MENTION = /\badmin[\s-]*vendor\b/i;
 const CLIENT_SHEET_MENTION = /\bclient sheet\b/i;
 const DEDUP_ACTION_PHRASES = /\b(duplicate|duplicates|dedup|de-dup|remove\s+duplicate|clean\s*up|rewrite)\b/i;
-// FULL DOMAIN DEDUP PHRASING (2026-09-21): a real, explicit request for the stronger "exactly one record
-// per domain/website" policy (collapseDomainDuplicatesToOnePerDomain() above), as opposed to the default
-// exact-duplicates-only proposal. Deliberately requires "per website"/"per domain"/"one unique ... per" --
-// language a plain "remove duplicates" request does not use -- so the weaker default stays the default
-// unless the user is explicit about wanting domain-level collapsing too.
-const DOMAIN_LEVEL_DEDUP_PHRASES = /\bper\s+(website|domain)\b|\bone\s+(unique\s+)?record\s+per\b|\bone\s+(unique\s+)?row\s+per\b/i;
-// PLATFORM-EXCLUSION PHRASING (2026-09-21): a real, explicit request to leave known large multi-tenant
-// platform domains (KNOWN_LARGE_PLATFORM_DOMAINS above -- LinkedIn, Facebook, Quora, etc.) OUT of the
-// domain-level collapse, matching the real refinement this feature's own live Admin - Vendor run needed
-// (collapsing quora.com/facebook.com/linkedin.com to one row each discarded far more real, distinct prospect
-// pages than collapsing a genuine single-site domain like a repeatedly-listed guest-post blog). Mentioning
-// platform exclusion only makes sense together with domain-level collapse, so matching this phrase ALSO
-// implies dedupeByDomain below -- a bare "exclude platforms" with no other dedup language would otherwise be
-// a silent no-op (ProposeExistingOutputTabCleanupOptions.excludedDomains only matters when
-// dedupeDomainDuplicates is true).
-const PLATFORM_EXCLUSION_PHRASES = /\bexclud(e|ing)\b[^.?!]{0,60}\bplatform/i;
 
 /**
  * ROUTING TARGET DETECTION (2026-09-21): distinguishes a request to self-dedupe one of ADASOS's OWN
@@ -696,14 +439,15 @@ const PLATFORM_EXCLUSION_PHRASES = /\bexclud(e|ing)\b[^.?!]{0,60}\bplatform/i;
  * unaffected by this. Deliberately narrow: requires BOTH a real mention of one of the two fixed,
  * system-defined output-tab names (never a user-chosen source/destination name) AND real dedup/cleanup
  * action language -- a bare "email the client sheet" or "the admin vendor spoke to me" does not match.
- * Returns null when neither tab is mentioned, or no dedup action is present.
+ * Returns null when neither tab is mentioned, or no dedup action is present. The domain-level-dedup /
+ * platform-exclusion intent (dedupeByDomain / excludePlatformDomains) is detected by the SAME shared
+ * detectDomainLevelDedupIntent() (spreadsheet-cleaning.ts) that google-sheets-cleaning.ts's
+ * source-into-destination flow now also uses -- never two separate phrase-matching implementations.
  */
 export interface ExistingOutputTabSelfCleanupTargets {
   readonly adminVendor: boolean;
   readonly clientSheet: boolean;
-  /** true when the message explicitly asks for one record per domain/website -- see DOMAIN_LEVEL_DEDUP_PHRASES above. Also true whenever excludePlatformDomains is true (see that field's own note). */
   readonly dedupeByDomain: boolean;
-  /** true when the message explicitly asks to exclude known large platform domains from the domain-level collapse -- see PLATFORM_EXCLUSION_PHRASES above. Only has any effect when dedupeByDomain is also true, which this always forces true when set. */
   readonly excludePlatformDomains: boolean;
 }
 
@@ -712,8 +456,7 @@ export function detectExistingOutputTabSelfCleanupRequest(message: string): Exis
   const clientSheet = CLIENT_SHEET_MENTION.test(message);
   if (!adminVendor && !clientSheet) return null;
   if (!DEDUP_ACTION_PHRASES.test(message)) return null;
-  const excludePlatformDomains = PLATFORM_EXCLUSION_PHRASES.test(message);
-  const dedupeByDomain = excludePlatformDomains || DOMAIN_LEVEL_DEDUP_PHRASES.test(message);
+  const { dedupeByDomain, excludePlatformDomains } = detectDomainLevelDedupIntent(message);
   return { adminVendor, clientSheet, dedupeByDomain, excludePlatformDomains };
 }
 

@@ -274,6 +274,78 @@ describe("processSelectedGoogleSheet -- server-side deterministic cleaning of a 
   });
 });
 
+// REAL, LIVE-CONFIRMED REGRESSION (2026-09-24): a real live chat request -- "Google Sheets Integration
+// Agent: clean the selected Health source and write the cleaned result to the selected Health destination.
+// Remove exact duplicates and apply one-record-per-domain cleanup, excluding large platform domains. ..." --
+// reached exactly this flow (processSelectedGoogleSheet, source-into-destination) and the resulting proposal
+// still only FLAGGED the 23 real domain-duplicate groups (49 rows) instead of collapsing them, confirmed via
+// a live PDF transcript. Root cause: this flow never applied domain-level collapsing at all -- only the
+// separate "Admin - Vendor"/"Client Sheet" self-cleanup flow (spreadsheet-existing-output-cleanup.ts) had
+// it, and even that flow's phrase detector required literal whitespace ("one record per domain"), which
+// would not have matched the real request's actual hyphenated wording ("one-record-per-domain") either. Both
+// are fixed: detectDomainLevelDedupIntent() (spreadsheet-cleaning.ts) now tolerates hyphens, and THIS flow
+// now calls it and applies collapseDomainDuplicatesToOnePerDomain() when it matches.
+describe("processSelectedGoogleSheet -- domain-level dedup (2026-09-24 fix): 'one record per domain' now actually removes, not just flags", () => {
+  const HEALTH_HEADER = ["URL", "DA", "PA", "SS", "DR", "TRAFFIC"];
+  function healthFixtureRows(): string[][] {
+    return [
+      HEALTH_HEADER,
+      ["https://medicalnewstoday.com/article-1", "70", "60", "40", "50", "500"],
+      ["https://rightpatient.com/guest-post", "45", "30", "20", "25", "300"],
+      ["https://linkedin.com/posts/dr-jane-1", "98", "80", "60", "70", "900"], // known platform domain
+      ["https://medicalnewstoday.com/article-2", "70", "60", "40", "50", "500"], // same domain, differs -- would be collapsed
+      ["https://linkedin.com/posts/dr-jane-2", "98", "80", "60", "70", "900"], // same platform domain -- should stay, NOT collapsed
+      ["https://uniquehealthsite.com/page", "55", "40", "30", "35", "400"],
+    ];
+  }
+
+  it("REGRESSION: the exact real request wording ('one-record-per-domain cleanup, excluding large platform domains') actually collapses non-platform domain duplicates and leaves the platform domain's rows untouched", async () => {
+    getSelectedSpreadsheetMock.mockResolvedValue({ id: "health-source-id", name: "Admin Sheet Health-FINAL" });
+    const rows = healthFixtureRows();
+    getAllSpreadsheetValuesMock.mockResolvedValue({ values: rows, rowsRead: rows.length - 1, batchesRead: 1, cappedAtSafetyLimit: false });
+    const userId = await createTestUser();
+
+    const message =
+      'Google Sheets Integration Agent: clean the selected Health source and write the cleaned result to the selected Health destination.\n\n' +
+      'Remove exact duplicates and apply one-record-per-domain cleanup, excluding large platform domains.';
+
+    const result = await processSelectedGoogleSheet(userId, message);
+    expect(result.ok).toBe(true);
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+
+    // medicalnewstoday.com collapsed from 2 rows to 1; linkedin.com (platform, excluded) keeps BOTH rows;
+    // rightpatient.com and uniquehealthsite.com are untouched singletons. 6 original -> 5 retained.
+    expect(result.reply).toContain("Retained records: 5");
+    expect(result.reply).toContain("EXCLUDED from domain-level collapsing");
+    expect(result.reply).toContain('Domain "linkedin.com"');
+    expect(result.reply).toContain("MATCHES rows read.");
+    expect(result.reply).not.toContain("DOES NOT MATCH");
+
+    const persisted = JSON.parse(approval!.resultJson) as { retainedRows: string[][] };
+    const retainedUrls = persisted.retainedRows.map((r) => r[0]);
+    expect(retainedUrls).toContain("https://linkedin.com/posts/dr-jane-1");
+    expect(retainedUrls).toContain("https://linkedin.com/posts/dr-jane-2");
+    expect(retainedUrls.filter((u) => u?.includes("medicalnewstoday.com"))).toHaveLength(1);
+  });
+
+  it("without a message (or one that doesn't ask for domain-level dedup), domain duplicates are still only FLAGGED, never removed -- unchanged default behavior", async () => {
+    getSelectedSpreadsheetMock.mockResolvedValue({ id: "health-source-id", name: "Admin Sheet Health-FINAL" });
+    const rows = healthFixtureRows();
+    getAllSpreadsheetValuesMock.mockResolvedValue({ values: rows, rowsRead: rows.length - 1, batchesRead: 1, cappedAtSafetyLimit: false });
+    const userId = await createTestUser();
+
+    const result = await processSelectedGoogleSheet(userId, "Clean the selected Health source and write the result to the destination.");
+    expect(result.ok).toBe(true);
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+
+    expect(result.reply).toContain("Retained records: 6"); // nothing removed -- only exact-dup removal applies, and there are none here
+    expect(result.reply).toContain("flagged for your review, NOT automatically removed");
+    expect(result.reply).not.toContain("EXCLUDED from domain-level collapsing");
+  });
+});
+
 function readableBatchCount(totalRowsIncludingHeader: number): number {
   return Math.ceil(totalRowsIncludingHeader / 500);
 }

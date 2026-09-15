@@ -1121,8 +1121,12 @@ export async function POST(request: Request) {
       // uses) -- these two branches are mutually exclusive by construction. A bare "is my Google Sheet
       // connected?" question with no operation verb still falls through, unaffected, to the generic
       // buildGoogleSheetsContext() branch further below.
+      // DOMAIN-LEVEL DEDUP WIRING (2026-09-24): the raw `message` is passed through so
+      // processSelectedGoogleSheet() can honor an explicit "one record per domain"/"excluding platform
+      // domains" request the SAME way the existing-output-tab branch above already does -- see that
+      // function's own header (google-sheets-cleaning.ts) for why this flow needed the same fix.
       try {
-        const processingResult = await processSelectedGoogleSheet(userId);
+        const processingResult = await processSelectedGoogleSheet(userId, message);
         assistantContent = processingResult.reply;
         spreadsheetCleaningApproval = processingResult.approvalMeta ?? null;
       } catch (error) {

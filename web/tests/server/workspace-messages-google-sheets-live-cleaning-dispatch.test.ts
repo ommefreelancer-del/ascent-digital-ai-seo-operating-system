@@ -21,12 +21,12 @@ describe("workspace messages route -- live dispatch reaches processSelectedGoogl
 
   it("dispatches to processSelectedGoogleSheet() when assigned to google-sheets-integration-agent, no spreadsheet attachment is present, and the message looks like an operation request", () => {
     expect(routeSource).toMatch(
-      /decision\.assignedAgentId === GOOGLE_SHEETS_INTEGRATION_AGENT_ID &&[\s\S]{0,80}!\(attachmentMeta &&[\s\S]{0,80}looksLikeSpreadsheetOperationRequest\(message\)[\s\S]{0,1500}await processSelectedGoogleSheet\(userId\)/,
+      /decision\.assignedAgentId === GOOGLE_SHEETS_INTEGRATION_AGENT_ID &&[\s\S]{0,80}!\(attachmentMeta &&[\s\S]{0,80}looksLikeSpreadsheetOperationRequest\(message\)[\s\S]{0,2000}await processSelectedGoogleSheet\(userId, message\)/,
     );
   });
 
   it("the live-sheet branch never calls processSpreadsheetAttachment -- it is mutually exclusive with the attachment/raw-row path, not layered on top of it", () => {
-    const liveSheetBranchIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId)");
+    const liveSheetBranchIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId, message)");
     expect(liveSheetBranchIdx).toBeGreaterThan(-1);
     const branchStart = routeSource.lastIndexOf("} else if (", liveSheetBranchIdx);
     const branchEnd = routeSource.indexOf("} else if (decision?.status === \"assigned\" && decision.assignedAgentId) {", liveSheetBranchIdx);
@@ -38,13 +38,13 @@ describe("workspace messages route -- live dispatch reaches processSelectedGoogl
 
   it("the live-sheet branch is gated on NOT having a spreadsheet-type attachment present -- the file-upload branch above it stays the exclusive handler when a real attachment IS present", () => {
     const attachmentBranchIdx = routeSource.indexOf("await processSpreadsheetAttachment(userId, attachmentMeta)");
-    const liveSheetBranchIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId)");
+    const liveSheetBranchIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId, message)");
     expect(attachmentBranchIdx).toBeGreaterThan(-1);
     expect(liveSheetBranchIdx).toBeGreaterThan(attachmentBranchIdx);
   });
 
   it("never sends spreadsheet rows through the LLM -- the live-sheet branch's only model-adjacent variable is the compact chat reply text, never a raw-rows blob", () => {
-    const liveSheetBranchIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId)");
+    const liveSheetBranchIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId, message)");
     const branchStart = routeSource.lastIndexOf("} else if (", liveSheetBranchIdx);
     const branchEnd = routeSource.indexOf("} else if (decision?.status === \"assigned\" && decision.assignedAgentId) {", liveSheetBranchIdx);
     const liveSheetBranchBody = routeSource.slice(branchStart, branchEnd);
