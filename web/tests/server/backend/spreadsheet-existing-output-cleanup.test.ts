@@ -183,7 +183,7 @@ describe("proposeExistingOutputTabCleanupForChat -- platform-exclusion wiring en
     ]);
   });
 
-  it("without platform-exclusion phrasing, a plain 'one record per domain' chat request still collapses platform domains too -- confirms excludePlatformDomains is what actually toggles this, not a hidden default", async () => {
+  it("PERMANENT RULE: even WITHOUT platform-exclusion phrasing, a plain 'one record per domain' chat request still protects known platform domains -- collapseDomainDuplicatesToOnePerDomain() enforces this unconditionally now, not the chat phrase detector", async () => {
     getWriteDestinationSpreadsheetMock.mockResolvedValue({ id: "dest-1", name: "SaaS Website Master Database" });
     getAllSpreadsheetValuesMock.mockResolvedValue({
       values: [
@@ -204,8 +204,8 @@ describe("proposeExistingOutputTabCleanupForChat -- platform-exclusion wiring en
     const result = await proposeExistingOutputTabCleanupForChat(userId, targets!);
 
     expect(result.ok).toBe(true);
-    expect(result.reply).not.toContain("EXCLUDED from domain-level collapsing");
-    expect(result.approvalMeta?.retainedRowCount).toBe(1);
+    expect(result.reply).toContain("EXCLUDED from domain-level collapsing");
+    expect(result.approvalMeta?.retainedRowCount).toBe(2); // both linkedin.com rows retained -- never collapsed
 
     const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
     createdAttachmentIds.push(approval!.attachmentId);
@@ -320,15 +320,15 @@ describe("proposeExistingOutputTabCleanup -- real, read-only self-dedup proposal
     ]);
   });
 
-  it("with { dedupeDomainDuplicates: true, excludedDomains: [...] }, leaves the excluded domain's rows untouched while still collapsing every other domain", async () => {
+  it("PERMANENT RULE: known large platform domains (e.g. linkedin.com) are excluded from collapsing by DEFAULT -- no options needed at all", async () => {
     getWriteDestinationSpreadsheetMock.mockResolvedValue({ id: "dest-1", name: "SaaS Website Master Database" });
     getAllSpreadsheetValuesMock.mockResolvedValue({
       values: [
         ["Clean URL", "DA"],
-        ["https://linkedin.com/post-1", "40"], // excluded domain -- kept
-        ["https://linkedin.com/post-2", "41"], // excluded domain -- ALSO kept (not collapsed)
-        ["https://alpha.com/a", "40"], // non-excluded domain -- kept
-        ["https://alpha.com/b", "41"], // non-excluded domain -- removed
+        ["https://linkedin.com/post-1", "40"], // known platform domain -- kept
+        ["https://linkedin.com/post-2", "41"], // known platform domain -- ALSO kept (never collapsed)
+        ["https://alpha.com/a", "40"], // non-platform domain -- kept
+        ["https://alpha.com/b", "41"], // non-platform domain -- removed
       ],
       rowsRead: 4,
       batchesRead: 1,
@@ -336,7 +336,8 @@ describe("proposeExistingOutputTabCleanup -- real, read-only self-dedup proposal
     });
     const userId = await createTestUser();
 
-    const result = await proposeExistingOutputTabCleanup(userId, ADMIN_VENDOR_SHEET_NAME, { dedupeDomainDuplicates: true, excludedDomains: ["linkedin.com"] });
+    // Deliberately NO additionalExcludedDomains option -- proves platform protection is unconditional.
+    const result = await proposeExistingOutputTabCleanup(userId, ADMIN_VENDOR_SHEET_NAME, { dedupeDomainDuplicates: true });
 
     expect(result.ok).toBe(true);
     expect(result.reply).toContain("EXCLUDED from domain-level collapsing");
@@ -350,6 +351,91 @@ describe("proposeExistingOutputTabCleanup -- real, read-only self-dedup proposal
       ["https://linkedin.com/post-1", "40"],
       ["https://linkedin.com/post-2", "41"],
       ["https://alpha.com/a", "40"],
+    ]);
+  });
+
+  it("with { dedupeDomainDuplicates: true, additionalExcludedDomains: [...] }, leaves an EXTRA (non-platform) excluded domain's rows untouched too, while still collapsing every other domain", async () => {
+    getWriteDestinationSpreadsheetMock.mockResolvedValue({ id: "dest-1", name: "SaaS Website Master Database" });
+    getAllSpreadsheetValuesMock.mockResolvedValue({
+      values: [
+        ["Clean URL", "DA"],
+        ["https://example-vendor.com/page-1", "40"], // additionally excluded, non-platform domain -- kept
+        ["https://example-vendor.com/page-2", "41"], // ALSO kept (not collapsed)
+        ["https://alpha.com/a", "40"], // ordinary domain -- kept
+        ["https://alpha.com/b", "41"], // ordinary domain -- removed
+      ],
+      rowsRead: 4,
+      batchesRead: 1,
+      cappedAtSafetyLimit: false,
+    });
+    const userId = await createTestUser();
+
+    const result = await proposeExistingOutputTabCleanup(userId, ADMIN_VENDOR_SHEET_NAME, { dedupeDomainDuplicates: true, additionalExcludedDomains: ["example-vendor.com"] });
+
+    expect(result.ok).toBe(true);
+    expect(result.reply).toContain("EXCLUDED from domain-level collapsing");
+    expect(result.reply).toContain('Domain "example-vendor.com"');
+    expect(result.approvalMeta?.retainedRowCount).toBe(3);
+
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+    const persistedResult = JSON.parse(approval!.resultJson) as CleaningResult;
+    expect(persistedResult.retainedRows).toEqual([
+      ["https://example-vendor.com/page-1", "40"],
+      ["https://example-vendor.com/page-2", "41"],
+      ["https://alpha.com/a", "40"],
+    ]);
+  });
+
+  it("PERMANENT RULE: a domain-duplicate group with exactly ONE already-priced member keeps THAT member, regardless of row order, and removes the unpriced sibling", async () => {
+    getWriteDestinationSpreadsheetMock.mockResolvedValue({ id: "dest-1", name: "SaaS Website Master Database" });
+    getAllSpreadsheetValuesMock.mockResolvedValue({
+      values: [
+        ["Clean URL", "DA", "Client Price", "Profit"],
+        ["https://alpha.com/unpriced", "40", "", ""], // lower row index, but NOT priced -- must be removed
+        ["https://alpha.com/priced", "41", "500", "120"], // higher row index, but IS priced -- must be kept
+      ],
+      rowsRead: 2,
+      batchesRead: 1,
+      cappedAtSafetyLimit: false,
+    });
+    const userId = await createTestUser();
+
+    const result = await proposeExistingOutputTabCleanup(userId, ADMIN_VENDOR_SHEET_NAME, { dedupeDomainDuplicates: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.approvalMeta?.retainedRowCount).toBe(1);
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+    const persistedResult = JSON.parse(approval!.resultJson) as CleaningResult;
+    expect(persistedResult.retainedRows).toEqual([["https://alpha.com/priced", "41", "500", "120"]]);
+  });
+
+  it("PERMANENT RULE: a domain-duplicate group with TWO already-priced members is left completely alone -- both kept, flagged for manual review, never auto-resolved", async () => {
+    getWriteDestinationSpreadsheetMock.mockResolvedValue({ id: "dest-1", name: "SaaS Website Master Database" });
+    getAllSpreadsheetValuesMock.mockResolvedValue({
+      values: [
+        ["Clean URL", "DA", "Client Price", "Profit"],
+        ["https://alpha.com/priced-1", "40", "500", "120"], // priced
+        ["https://alpha.com/priced-2", "41", "600", "150"], // ALSO priced -- ambiguous, must not guess
+      ],
+      rowsRead: 2,
+      batchesRead: 1,
+      cappedAtSafetyLimit: false,
+    });
+    const userId = await createTestUser();
+
+    const result = await proposeExistingOutputTabCleanup(userId, ADMIN_VENDOR_SHEET_NAME, { dedupeDomainDuplicates: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.reply).toContain("KEPT BOTH FOR REVIEW");
+    expect(result.approvalMeta?.retainedRowCount).toBe(2);
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+    const persistedResult = JSON.parse(approval!.resultJson) as CleaningResult;
+    expect(persistedResult.retainedRows).toEqual([
+      ["https://alpha.com/priced-1", "40", "500", "120"],
+      ["https://alpha.com/priced-2", "41", "600", "150"],
     ]);
   });
 
@@ -478,19 +564,19 @@ describe("collapseDomainDuplicatesToOnePerDomain -- pure, deterministic 'one rec
     expect(collapsed.domainDuplicateRemovedRowIndexes.size).toBe(0);
   });
 
-  it("leaves an excluded domain's group completely untouched (every member retained, none removed), while still collapsing a non-excluded domain", async () => {
+  it("PERMANENT RULE: a known large platform domain's group is completely untouched (every member retained, none removed) with NO options at all, while still collapsing a non-platform domain", async () => {
     const { buildCleaningResult } = await import("../../../src/server/backend/spreadsheet-cleaning");
     const headers = ["Clean URL", "DA"];
     const rows = [
-      ["https://linkedin.com/post-1", "40"], // index 0 -- excluded domain, differing content -- kept
-      ["https://linkedin.com/post-2", "41"], // index 1 -- excluded domain -- kept too (not collapsed)
-      ["https://alpha.com/a", "40"], // index 2 -- non-excluded domain -- kept (lowest of its group)
-      ["https://alpha.com/b", "41"], // index 3 -- non-excluded domain -- removed
+      ["https://linkedin.com/post-1", "40"], // index 0 -- known platform domain, differing content -- kept
+      ["https://linkedin.com/post-2", "41"], // index 1 -- known platform domain -- kept too (not collapsed)
+      ["https://alpha.com/a", "40"], // index 2 -- ordinary domain -- kept (lowest of its group)
+      ["https://alpha.com/b", "41"], // index 3 -- ordinary domain -- removed
     ];
     const base = buildCleaningResult(headers, rows);
     expect(base.domainDuplicateGroups).toHaveLength(2);
 
-    const collapsed = collapseDomainDuplicatesToOnePerDomain(base, { excludedDomains: new Set(["linkedin.com"]) });
+    const collapsed = collapseDomainDuplicatesToOnePerDomain(base); // deliberately no options
 
     expect(collapsed.excludedDomainGroups).toHaveLength(1);
     expect(collapsed.excludedDomainGroups[0]!.normalizedDomain).toBe("linkedin.com");
@@ -500,6 +586,72 @@ describe("collapseDomainDuplicatesToOnePerDomain -- pure, deterministic 'one rec
     expect(collapsed.result.retainedRowIndexes).toEqual([0, 1, 2]);
     // Both linkedin.com rows stay flagged for manual review (genuinely still ambiguous -- never resolved automatically).
     expect(collapsed.result.manualReviewRowIndexes).toEqual([0, 1]);
+  });
+
+  it("additionalExcludedDomains adds a NON-platform domain to the always-on platform exclusion, without disabling it", async () => {
+    const { buildCleaningResult } = await import("../../../src/server/backend/spreadsheet-cleaning");
+    const headers = ["Clean URL", "DA"];
+    const rows = [
+      ["https://example-vendor.com/a", "40"], // additionally excluded -- kept
+      ["https://example-vendor.com/b", "41"], // additionally excluded -- kept too
+      ["https://alpha.com/a", "40"],
+      ["https://alpha.com/b", "41"], // ordinary domain -- removed
+    ];
+    const base = buildCleaningResult(headers, rows);
+
+    const collapsed = collapseDomainDuplicatesToOnePerDomain(base, { additionalExcludedDomains: new Set(["example-vendor.com"]) });
+
+    expect(collapsed.excludedDomainGroups.map((g) => g.normalizedDomain).sort()).toEqual(["example-vendor.com"]);
+    expect(collapsed.result.retainedRowIndexes).toEqual([0, 1, 2]);
+  });
+
+  it("PERMANENT RULE: a group with exactly one already-priced member is collapsed to THAT member, even when it is not the lowest row index", async () => {
+    const { buildCleaningResult } = await import("../../../src/server/backend/spreadsheet-cleaning");
+    const headers = ["Clean URL", "DA", "Client Price"];
+    const rows = [
+      ["https://alpha.com/unpriced", "40", ""], // index 0 -- lower index, but unpriced -- removed
+      ["https://alpha.com/priced", "41", "500"], // index 1 -- higher index, but priced -- kept
+    ];
+    const base = buildCleaningResult(headers, rows);
+
+    const collapsed = collapseDomainDuplicatesToOnePerDomain(base);
+
+    expect(collapsed.domainDuplicateKeptRowIndexes.has(1)).toBe(true);
+    expect(collapsed.domainDuplicateRemovedRowIndexes.has(0)).toBe(true);
+    expect(collapsed.result.retainedRowIndexes).toEqual([1]);
+    expect(collapsed.pricingProtectedGroups).toHaveLength(0);
+  });
+
+  it("PERMANENT RULE: a group with two or more already-priced members is left entirely alone -- pricingProtectedGroups records it, nothing removed", async () => {
+    const { buildCleaningResult } = await import("../../../src/server/backend/spreadsheet-cleaning");
+    const headers = ["Clean URL", "DA", "Client Price"];
+    const rows = [
+      ["https://alpha.com/priced-1", "40", "500"],
+      ["https://alpha.com/priced-2", "41", "600"],
+    ];
+    const base = buildCleaningResult(headers, rows);
+
+    const collapsed = collapseDomainDuplicatesToOnePerDomain(base);
+
+    expect(collapsed.pricingProtectedGroups).toHaveLength(1);
+    expect(collapsed.pricingProtectedGroups[0]!.normalizedDomain).toBe("alpha.com");
+    expect(collapsed.domainDuplicateRemovedRowIndexes.size).toBe(0);
+    expect(collapsed.result.retainedRowIndexes).toEqual([0, 1]);
+    expect(collapsed.result.manualReviewRowIndexes).toEqual([0, 1]);
+  });
+
+  it("recognizes the real 'Admin Prices' (plural) header as a pricing column, not just the singular 'Admin Price'", async () => {
+    const { buildCleaningResult } = await import("../../../src/server/backend/spreadsheet-cleaning");
+    const headers = ["Clean URL", "DA", "Admin Prices "]; // real, live-confirmed header spelling (plural + trailing space)
+    const rows = [
+      ["https://alpha.com/unpriced", "40", ""],
+      ["https://alpha.com/priced", "41", "300"],
+    ];
+    const base = buildCleaningResult(headers, rows);
+
+    const collapsed = collapseDomainDuplicatesToOnePerDomain(base);
+
+    expect(collapsed.result.retainedRowIndexes).toEqual([1]); // the "Admin Prices"-priced row is kept, not the lowest index
   });
 });
 

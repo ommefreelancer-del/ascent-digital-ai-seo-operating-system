@@ -75,15 +75,13 @@ export interface ProposeExistingOutputTabCleanupOptions {
   /** Default false (preserves the original, already-tested behavior: exact-duplicate removal only, domain
    * duplicates flagged for review but never removed). true applies collapseDomainDuplicatesToOnePerDomain()
    * on top -- exactly one row kept per website/domain, per an explicit user request. See that function's own
-   * header for the exact, stated selection rule. */
+   * header for the exact, stated selection rule -- it ALWAYS protects known large platform domains and
+   * already-priced/dealt records, unconditionally, with no option here to turn that off. */
   readonly dedupeDomainDuplicates?: boolean;
-  /** Only meaningful when dedupeDomainDuplicates is true. Normalized domains to leave flagged-only (never
-   * collapsed) -- omitted/empty means every domain group is collapsed, including large platforms. Never
-   * defaults to KNOWN_LARGE_PLATFORM_DOMAINS automatically: platform exclusion changes what "one record per
-   * domain" actually removes, so it stays an explicit, stated opt-in per call rather than a silent default
-   * that could surprise an existing caller. Pass KNOWN_LARGE_PLATFORM_DOMAINS explicitly to get that
-   * behavior. */
-  readonly excludedDomains?: readonly string[];
+  /** Only meaningful when dedupeDomainDuplicates is true. Normalized domains to ALSO leave flagged-only, on
+   * top of the always-on KNOWN_LARGE_PLATFORM_DOMAINS protection -- see
+   * collapseDomainDuplicatesToOnePerDomain()'s own CollapseDomainDuplicatesOptions.additionalExcludedDomains. */
+  readonly additionalExcludedDomains?: readonly string[];
 }
 
 /**
@@ -121,8 +119,8 @@ export async function proposeExistingOutputTabCleanup(userId: string, sheetName:
 
   const baseCleaningResult = buildCleaningResult(headers, rows);
   const dedupeDomainDuplicates = options?.dedupeDomainDuplicates ?? false;
-  const excludedDomains = new Set(options?.excludedDomains ?? []);
-  const domainDedup = dedupeDomainDuplicates ? collapseDomainDuplicatesToOnePerDomain(baseCleaningResult, { excludedDomains }) : null;
+  const additionalExcludedDomains = new Set(options?.additionalExcludedDomains ?? []);
+  const domainDedup = dedupeDomainDuplicates ? collapseDomainDuplicatesToOnePerDomain(baseCleaningResult, { additionalExcludedDomains }) : null;
   const cleaningResult = domainDedup?.result ?? baseCleaningResult;
 
   const sourceRecord = await db.attachment.create({
@@ -138,14 +136,19 @@ export async function proposeExistingOutputTabCleanup(userId: string, sheetName:
 
   const approval = await createPendingCleaningApproval(userId, sourceRecord.id, cleaningResult);
 
+  // The full, EFFECTIVE excluded-domain set (built-in platforms are ALWAYS excluded -- see
+  // collapseDomainDuplicatesToOnePerDomain()'s own header -- plus whatever additional domains this call
+  // asked for), used only for describing WHICH groups are platform-excluded vs. pricing-protected below.
+  const effectiveExcludedDomains = new Set([...KNOWN_LARGE_PLATFORM_DOMAINS, ...additionalExcludedDomains]);
+
   const workbook = buildXlsxWorkbook([{ name: sheetName, headers: cleaningResult.headers, rows: cleaningResult.retainedRows }]);
   const auditCsv = domainDedup
-    ? buildFullyDedupedCleaningAuditCsv(domainDedup.base, new Set(domainDedup.result.retainedRowIndexes), excludedDomains)
+    ? buildFullyDedupedCleaningAuditCsv(domainDedup.base, new Set(domainDedup.result.retainedRowIndexes), effectiveExcludedDomains)
     : buildCleaningAuditCsv(cleaningResult);
   await saveCleaningArtifacts(approval.id, workbook, auditCsv);
 
   const reply = domainDedup
-    ? buildFullyDedupedExistingOutputCleanupReportForChat(sheetName, destination.name, readResult, domainDedup, approval.id, excludedDomains)
+    ? buildFullyDedupedExistingOutputCleanupReportForChat(sheetName, destination.name, readResult, domainDedup, approval.id, effectiveExcludedDomains)
     : buildExistingOutputCleanupReportForChat(sheetName, destination.name, readResult, cleaningResult, approval.id);
 
   return {
@@ -242,7 +245,8 @@ function buildExistingOutputCleanupReportForChat(sheetName: string, destinationN
  */
 function buildFullyDedupedExistingOutputCleanupReportForChat(sheetName: string, destinationName: string, readResult: AllSpreadsheetValuesResult, domainDedup: DomainDedupedCleaningResult, approvalId: string, excludedDomains: ReadonlySet<string>): string {
   const { base, result } = domainDedup;
-  const collapsedGroups = base.domainDuplicateGroups.filter((g) => !excludedDomains.has(g.normalizedDomain));
+  const protectedGroups = new Set([...domainDedup.excludedDomainGroups, ...domainDedup.pricingProtectedGroups]);
+  const collapsedGroups = base.domainDuplicateGroups.filter((g) => !protectedGroups.has(g));
   const lines: string[] = [];
   lines.push(
     `I read the "${sheetName}" tab in "${destinationName}" (ADASOS's own already-written output, not a new source) -- ` +
@@ -325,6 +329,21 @@ function buildFullyDedupedExistingOutputCleanupReportForChat(sheetName: string, 
     }
     if (domainDedup.excludedDomainGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
       lines.push(`  ...and ${domainDedup.excludedDomainGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more excluded domain(s) -- see the attached audit CSV for the complete list.`);
+    }
+  }
+
+  if (domainDedup.pricingProtectedGroups.length > 0) {
+    const protectedRowTotal = domainDedup.pricingProtectedGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+    lines.push("");
+    lines.push(
+      `KEPT BOTH FOR REVIEW (two or more records for the same domain already carry real pricing/deal data -- never auto-resolved, per "if both duplicates are protected deal/priced records, keep both for review"): ` +
+        `${domainDedup.pricingProtectedGroups.length} domain(s), ${protectedRowTotal} row(s) total.`,
+    );
+    for (const group of domainDedup.pricingProtectedGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
+      lines.push(`  - Domain "${group.normalizedDomain}": data row(s) ${group.rowIndexes.map((i) => i + 1).join(", ")} -- all retained, flagged for manual review.`);
+    }
+    if (domainDedup.pricingProtectedGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
+      lines.push(`  ...and ${domainDedup.pricingProtectedGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more -- see the attached audit CSV for the complete list.`);
     }
   }
 
@@ -472,10 +491,11 @@ export function detectExistingOutputTabSelfCleanupRequest(message: string): Exis
  */
 export async function proposeExistingOutputTabCleanupForChat(userId: string, targets: ExistingOutputTabSelfCleanupTargets): Promise<SpreadsheetProcessingResult> {
   const sheetName = targets.adminVendor ? ADMIN_VENDOR_SHEET_NAME : CLIENT_WEBSITES_SHEET_NAME;
-  const result = await proposeExistingOutputTabCleanup(userId, sheetName, {
-    dedupeDomainDuplicates: targets.dedupeByDomain,
-    excludedDomains: targets.excludePlatformDomains ? KNOWN_LARGE_PLATFORM_DOMAINS : undefined,
-  });
+  // Known large platform domains are ALWAYS protected by collapseDomainDuplicatesToOnePerDomain() itself
+  // now (see its own header) -- targets.excludePlatformDomains no longer needs to be threaded through here;
+  // it still contributes to detectDomainLevelDedupIntent()'s dedupeByDomain trigger (mentioning platform
+  // exclusion implies wanting domain-level dedup at all).
+  const result = await proposeExistingOutputTabCleanup(userId, sheetName, { dedupeDomainDuplicates: targets.dedupeByDomain });
   if (targets.adminVendor && targets.clientSheet && result.ok) {
     return {
       ...result,

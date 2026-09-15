@@ -344,6 +344,53 @@ describe("processSelectedGoogleSheet -- domain-level dedup (2026-09-24 fix): 'on
     expect(result.reply).toContain("flagged for your review, NOT automatically removed");
     expect(result.reply).not.toContain("EXCLUDED from domain-level collapsing");
   });
+
+  // REAL, LIVE-CONFIRMED PERMANENT-RULE GAP (2026-09-24, second report): the stated PERMANENT rule set also
+  // requires "NEVER remove or overwrite any existing record with a deal/pricing data", "if a duplicate has
+  // one protected deal/priced record, remove only the other duplicate", and "if both duplicates are
+  // protected deal/priced records, keep both for review" -- none of which the domain-level collapse's
+  // selection logic honored at all (it only ever picked the lowest row index, with zero pricing awareness).
+  // The live report that surfaced this had zero priced source rows, so it never actually violated the rule
+  // yet -- these tests prove it now would, and that the fix prevents it.
+  it("PERMANENT RULE: within processSelectedGoogleSheet(), a domain group with exactly one already-priced row keeps THAT row even when a lower-indexed unpriced sibling exists", async () => {
+    getSelectedSpreadsheetMock.mockResolvedValue({ id: "health-source-id", name: "Admin Sheet Health-FINAL" });
+    const rows = [
+      HEALTH_HEADER.concat(["Client Price"]),
+      ["https://medicalnewstoday.com/unpriced", "70", "60", "40", "50", "500", "" /* unpriced -- lower index */],
+      ["https://medicalnewstoday.com/priced", "70", "60", "40", "50", "500", "900" /* priced -- higher index */],
+    ];
+    getAllSpreadsheetValuesMock.mockResolvedValue({ values: rows, rowsRead: rows.length - 1, batchesRead: 1, cappedAtSafetyLimit: false });
+    const userId = await createTestUser();
+
+    const result = await processSelectedGoogleSheet(userId, "Clean this Health sheet: apply one-record-per-domain cleanup.");
+    expect(result.ok).toBe(true);
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+
+    const persisted = JSON.parse(approval!.resultJson) as { retainedRows: string[][] };
+    expect(persisted.retainedRows).toHaveLength(1);
+    expect(persisted.retainedRows[0]![0]).toBe("https://medicalnewstoday.com/priced");
+  });
+
+  it("PERMANENT RULE: within processSelectedGoogleSheet(), a domain group with TWO already-priced rows is left completely alone -- both kept, flagged for manual review", async () => {
+    getSelectedSpreadsheetMock.mockResolvedValue({ id: "health-source-id", name: "Admin Sheet Health-FINAL" });
+    const rows = [
+      HEALTH_HEADER.concat(["Client Price"]),
+      ["https://medicalnewstoday.com/priced-1", "70", "60", "40", "50", "500", "900"],
+      ["https://medicalnewstoday.com/priced-2", "70", "60", "40", "50", "500", "950"],
+    ];
+    getAllSpreadsheetValuesMock.mockResolvedValue({ values: rows, rowsRead: rows.length - 1, batchesRead: 1, cappedAtSafetyLimit: false });
+    const userId = await createTestUser();
+
+    const result = await processSelectedGoogleSheet(userId, "Clean this Health sheet: apply one-record-per-domain cleanup.");
+    expect(result.ok).toBe(true);
+    expect(result.reply).toContain("KEPT BOTH FOR REVIEW");
+    const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+    createdAttachmentIds.push(approval!.attachmentId);
+
+    const persisted = JSON.parse(approval!.resultJson) as { retainedRows: string[][] };
+    expect(persisted.retainedRows).toHaveLength(2);
+  });
 });
 
 function readableBatchCount(totalRowsIncludingHeader: number): number {

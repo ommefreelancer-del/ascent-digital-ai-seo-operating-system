@@ -34,6 +34,7 @@ import {
   realignColumnShiftedRow,
   collapseDomainDuplicatesToOnePerDomain,
   detectDomainLevelDedupIntent,
+  detectPricingColumns,
   KNOWN_LARGE_PLATFORM_DOMAINS,
   type CleaningResult,
   type DomainDedupedCleaningResult,
@@ -103,18 +104,6 @@ export type DestinationReadOutcome =
 
 /** Ceiling for the destination read -- same value and same honesty convention as MAX_ROWS_FOR_SERVER_SIDE_PROCESSING above: a real, large existing Admin/deal-tracking destination must never be silently truncated either. */
 const MAX_ROWS_FOR_DESTINATION_READ = 200_000;
-
-const PRICING_COLUMN_NAMES = ["Admin Price", "Client Price", "Profit", "Deal Status"];
-
-function normalizeHeaderForPricingMatch(header: string): string {
-  return header.trim().toLowerCase();
-}
-
-/** Real, exact (normalized) matches only against PRICING_COLUMN_NAMES -- never a substring/fuzzy guess. Preserves the destination's OWN header casing/spelling in the returned list (never rewritten). */
-function detectPricingColumns(headers: readonly string[]): readonly string[] {
-  const normalizedTargets = new Set(PRICING_COLUMN_NAMES.map(normalizeHeaderForPricingMatch));
-  return headers.filter((header) => normalizedTargets.has(normalizeHeaderForPricingMatch(header)));
-}
 
 /**
  * Restores the missing destination-selection step: if the user has NOT yet configured a Google Sheets
@@ -221,14 +210,13 @@ export async function processSelectedGoogleSheet(userId: string, message?: strin
   // "Admin - Vendor"/"Client Sheet" by name) -- and this flow never applied domain-level collapsing at all,
   // only ever flagging domain duplicates for manual review. detectDomainLevelDedupIntent() (shared with
   // that other flow, spreadsheet-cleaning.ts) and collapseDomainDuplicatesToOnePerDomain() close that gap
-  // here too, so "one record per domain" (and "excluding platform domains") is honored automatically
-  // whenever the request text asks for it, regardless of which flow the request reaches. Optional `message`
-  // (omitted by every pre-existing caller/test) preserves the exact prior default (exact-duplicate removal
-  // only, domain duplicates flagged) when absent.
-  const intent = message ? detectDomainLevelDedupIntent(message) : { dedupeByDomain: false, excludePlatformDomains: false };
-  const domainDedup: DomainDedupedCleaningResult | null = intent.dedupeByDomain
-    ? collapseDomainDuplicatesToOnePerDomain(baseCleaningResult, { excludedDomains: intent.excludePlatformDomains ? new Set(KNOWN_LARGE_PLATFORM_DOMAINS) : undefined })
-    : null;
+  // here too, so "one record per domain" is honored automatically whenever the request text asks for it,
+  // regardless of which flow the request reaches. Optional `message` (omitted by every pre-existing
+  // caller/test) preserves the exact prior default (exact-duplicate removal only, domain duplicates
+  // flagged) when absent. collapseDomainDuplicatesToOnePerDomain() itself ALWAYS protects known large
+  // platform domains and already-priced/dealt records -- see its own header -- no options needed here.
+  const intent = message ? detectDomainLevelDedupIntent(message) : { dedupeByDomain: false };
+  const domainDedup: DomainDedupedCleaningResult | null = intent.dedupeByDomain ? collapseDomainDuplicatesToOnePerDomain(baseCleaningResult) : null;
   const cleaningResult = domainDedup?.result ?? baseCleaningResult;
 
   const sourceRecord = await db.attachment.create({
@@ -264,7 +252,7 @@ export async function processSelectedGoogleSheet(userId: string, message?: strin
     { name: CLIENT_WEBSITES_SHEET_NAME, headers: trafficSplit.clientWebsites.headers, rows: trafficSplit.clientWebsites.rows, columnWidths: BUSINESS_SCHEMA_COLUMN_WIDTHS, wrapTextColumns: BUSINESS_SCHEMA_WRAP_TEXT_COLUMNS },
   ]);
   const auditCsv = domainDedup
-    ? buildFullyDedupedCleaningAuditCsv(domainDedup.base, new Set(domainDedup.result.retainedRowIndexes), intent.excludePlatformDomains ? new Set(KNOWN_LARGE_PLATFORM_DOMAINS) : undefined)
+    ? buildFullyDedupedCleaningAuditCsv(domainDedup.base, new Set(domainDedup.result.retainedRowIndexes), new Set(KNOWN_LARGE_PLATFORM_DOMAINS))
     : buildCleaningAuditCsv(cleaningResult);
   await saveCleaningArtifacts(approval.id, cleanedWorkbook, auditCsv);
 
@@ -351,7 +339,8 @@ function buildLiveSheetCleaningReportForChat(
   }
   lines.push("");
   if (domainDedup) {
-    const collapsedGroups = base.domainDuplicateGroups.filter((g) => !domainDedup.excludedDomainGroups.includes(g));
+    const protectedGroups = new Set([...domainDedup.excludedDomainGroups, ...domainDedup.pricingProtectedGroups]);
+    const collapsedGroups = base.domainDuplicateGroups.filter((g) => !protectedGroups.has(g));
     if (collapsedGroups.length === 0) {
       lines.push("Domain/URL duplicate candidates collapsed to one record per domain: none.");
     } else {
@@ -379,6 +368,20 @@ function buildLiveSheetCleaningReportForChat(
       }
       if (domainDedup.excludedDomainGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
         lines.push(`  ...and ${domainDedup.excludedDomainGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more excluded domain(s) -- see the attached audit CSV for the complete list.`);
+      }
+    }
+    if (domainDedup.pricingProtectedGroups.length > 0) {
+      const protectedRowTotal = domainDedup.pricingProtectedGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+      lines.push("");
+      lines.push(
+        `KEPT BOTH FOR REVIEW (two or more records for the same domain already carry real pricing/deal data -- never auto-resolved, per "if both duplicates are protected deal/priced records, keep both for review"): ` +
+          `${domainDedup.pricingProtectedGroups.length} domain(s), ${protectedRowTotal} row(s) total.`,
+      );
+      for (const group of domainDedup.pricingProtectedGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
+        lines.push(`  - Domain "${group.normalizedDomain}": data row(s) ${group.rowIndexes.map((i) => i + 1).join(", ")} -- all retained, flagged for manual review.`);
+      }
+      if (domainDedup.pricingProtectedGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
+        lines.push(`  ...and ${domainDedup.pricingProtectedGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more -- see the attached audit CSV for the complete list.`);
       }
     }
   } else if (result.domainDuplicateGroups.length === 0) {
@@ -436,9 +439,14 @@ function buildLiveSheetCleaningReportForChat(
     // above). The default path below is left byte-identical to this function's prior behavior.
     lines.push(`Original data rows read (server-side, complete): ${base.originalRowCount}`);
     lines.push(`Exact duplicate rows removed: ${exactDuplicateActualRemovedCount} (in ${base.exactDuplicateGroups.length} group(s))`);
-    lines.push(`Domain/URL duplicate rows removed (one record per domain): ${domainDedup.domainDuplicateAdditionalRemovedRowIndexes.size} (in ${base.domainDuplicateGroups.length - domainDedup.excludedDomainGroups.length} group(s))`);
+    lines.push(
+      `Domain/URL duplicate rows removed (one record per domain): ${domainDedup.domainDuplicateAdditionalRemovedRowIndexes.size} (in ${base.domainDuplicateGroups.length - domainDedup.excludedDomainGroups.length - domainDedup.pricingProtectedGroups.length} group(s))`,
+    );
     if (domainDedup.excludedDomainGroups.length > 0) {
       lines.push(`Domain/URL duplicate rows flagged (known platform domains, excluded from collapse): ${domainDedup.excludedDomainGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0)} (in ${domainDedup.excludedDomainGroups.length} group(s))`);
+    }
+    if (domainDedup.pricingProtectedGroups.length > 0) {
+      lines.push(`Domain/URL duplicate rows flagged (two or more already-priced records, kept both for review): ${domainDedup.pricingProtectedGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0)} (in ${domainDedup.pricingProtectedGroups.length} group(s))`);
     }
   } else {
     lines.push(`Original data rows read (server-side, complete): ${result.originalRowCount}`);

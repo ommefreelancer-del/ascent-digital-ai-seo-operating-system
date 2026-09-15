@@ -322,9 +322,18 @@ export function buildCleaningAuditCsv(result: CleaningResult): string {
  * Curated, explicit, general-knowledge list of well-known large platforms -- NOT derived from which domains
  * happened to repeat most in any one dataset (a real spam-scraped single site could also repeat hundreds of
  * times and would wrongly look "large" by that measure alone). Deliberately excludes anything not
- * confidently a well-known multi-tenant platform. Reviewable and extendable -- pass a different/extra set
- * via CollapseDomainDuplicatesOptions.excludedDomains instead of editing this constant if a specific run
- * needs different exclusions.
+ * confidently a well-known multi-tenant platform.
+ *
+ * ALWAYS-ON PROTECTION (2026-09-24): a real, live-confirmed gap -- this list previously only took effect
+ * when a caller explicitly opted in (originally via chat phrase detection requiring the word
+ * "exclude"/"excluding"). A real, live request phrased instead as "keep separate URLs for large platform
+ * domains" -- a stated PERMANENT rule, not a one-off preference -- never matched that phrase, so platform
+ * domains were silently subject to full collapse like any other domain (harmless only by chance, since none
+ * of that particular run's real duplicate groups happened to be a platform domain). collapseDomainDuplicat
+ * esToOnePerDomain() below now ALWAYS protects every domain on this list, unconditionally, with no opt-in
+ * required -- see CollapseDomainDuplicatesOptions.additionalExcludedDomains for adding MORE exclusions on
+ * top of this list; there is no way to turn OFF protection for a domain already on this list, since that
+ * would defeat the "permanent rule" the user explicitly asked for.
  */
 export const KNOWN_LARGE_PLATFORM_DOMAINS: readonly string[] = [
   "facebook.com",
@@ -353,6 +362,44 @@ export const KNOWN_LARGE_PLATFORM_DOMAINS: readonly string[] = [
   "fiverr.com",
 ];
 
+// PRICING/DEAL-PROTECTION (2026-09-24): a real, live-confirmed compliance gap -- the domain-level collapse
+// selection rule ("keep the lowest original row index") had NO awareness of pricing/deal data at all. A
+// real, stated PERMANENT rule requires: a row that already carries deal/pricing data must NEVER be the one
+// removed by domain-level collapse -- if exactly one member of a domain group is priced, THAT one must be
+// kept regardless of row index; if two or more members are priced, the WHOLE group must be left alone (kept
+// exactly as-is, flagged for manual review) rather than guessing which priced record is more "correct". This
+// had no live-data trigger yet (the real run that surfaced this gap had zero priced source rows), but is a
+// real, permanent-rule violation waiting to happen the first time it does. Shared with
+// readWriteDestinationForDuplicateProtection()'s own pricing-column detection (google-sheets-cleaning.ts) so
+// both mechanisms recognize the exact same set of real-world header spellings -- never two, potentially
+// drifting definitions of "this column holds pricing/deal data".
+export const PRICING_COLUMN_NAMES: readonly string[] = ["Admin Price", "Admin Prices", "Client Price", "Client Prices", "Profit", "Deal Status"];
+
+function normalizeHeaderForPricingMatch(header: string): string {
+  return header.trim().toLowerCase();
+}
+
+/** Real, exact (normalized) matches only against PRICING_COLUMN_NAMES -- never a substring/fuzzy guess. Preserves the sheet's OWN header casing/spelling in the returned list (never rewritten). */
+export function detectPricingColumns(headers: readonly string[]): readonly string[] {
+  const normalizedTargets = new Set(PRICING_COLUMN_NAMES.map(normalizeHeaderForPricingMatch));
+  return headers.filter((header) => normalizedTargets.has(normalizeHeaderForPricingMatch(header)));
+}
+
+/** Same matching as detectPricingColumns(), returning column INDEXES instead of names -- what a row-level "is this row priced?" check actually needs. */
+function detectPricingColumnIndexes(headers: readonly string[]): readonly number[] {
+  const normalizedTargets = new Set(PRICING_COLUMN_NAMES.map(normalizeHeaderForPricingMatch));
+  const indexes: number[] = [];
+  headers.forEach((header, index) => {
+    if (normalizedTargets.has(normalizeHeaderForPricingMatch(header))) indexes.push(index);
+  });
+  return indexes;
+}
+
+/** True when `row` has a real, non-blank value in ANY detected pricing/deal column -- never a guess about which specific column matters most. */
+function isRowPriced(row: readonly string[], pricingColumnIndexes: readonly number[]): boolean {
+  return pricingColumnIndexes.some((index) => (row[index] ?? "").trim() !== "");
+}
+
 export interface DomainDedupedCleaningResult {
   /** The result BEFORE this pass -- exact-duplicate removal only, domain groups still just flagged. Kept so callers/report builders can still show the real, full duplicate-group data. */
   readonly base: CleaningResult;
@@ -364,34 +411,61 @@ export interface DomainDedupedCleaningResult {
   readonly domainDuplicateRemovedRowIndexes: ReadonlySet<number>;
   /** The subset of domainDuplicateRemovedRowIndexes that were STILL present in base.retainedRowIndexes (i.e. not already removed by exact-duplicate collapse) -- the TRUE incremental number of rows this pass removes on top of exact-duplicate removal. By construction, exactDuplicateGroups' own removed-row count + this set's size + result.retainedRowIndexes.length always equals base.originalRowCount exactly -- this is the set to use for any reconciling summary total. */
   readonly domainDuplicateAdditionalRemovedRowIndexes: ReadonlySet<number>;
-  /** Domain groups that were deliberately left alone (not collapsed) because their normalized domain is in excludedDomains -- still flagged, exactly like the default (no-collapse) mode, never removed. */
+  /** Domain groups that were deliberately left alone (not collapsed) because their normalized domain is a known large platform (always) or an additionalExcludedDomains entry -- still flagged, exactly like the default (no-collapse) mode, never removed. */
   readonly excludedDomainGroups: readonly DomainDuplicateGroup[];
+  /** Domain groups left alone because TWO OR MORE members already carry real pricing/deal data -- "If both duplicates are protected deal/priced records, keep both for review," never auto-resolved by guessing which priced record is correct. Disjoint from excludedDomainGroups (a platform-excluded group is never also pricing-protected; it was never evaluated for pricing). */
+  readonly pricingProtectedGroups: readonly DomainDuplicateGroup[];
 }
 
 export interface CollapseDomainDuplicatesOptions {
-  /** Normalized domains (e.g. "linkedin.com") to leave alone -- their groups stay flagged-only, exactly like the default mode, never collapsed to one row. Case-insensitive; compared against the same normalizeDomain() output buildCleaningResult() already used to form the group. */
-  readonly excludedDomains?: ReadonlySet<string>;
+  /** Normalized domains (e.g. a specific non-platform site) to ALSO leave alone, on top of the always-on KNOWN_LARGE_PLATFORM_DOMAINS protection above -- their groups stay flagged-only, never collapsed. Case-insensitive; compared against the same normalizeDomain() output buildCleaningResult() already used to form the group. There is no option to disable KNOWN_LARGE_PLATFORM_DOMAINS protection itself. */
+  readonly additionalExcludedDomains?: ReadonlySet<string>;
 }
 
 export function collapseDomainDuplicatesToOnePerDomain(base: CleaningResult, options?: CollapseDomainDuplicatesOptions): DomainDedupedCleaningResult {
-  const excludedDomains = options?.excludedDomains;
+  const excludedDomains = new Set([...KNOWN_LARGE_PLATFORM_DOMAINS, ...(options?.additionalExcludedDomains ?? [])]);
+  const pricingColumnIndexes = detectPricingColumnIndexes(base.headers);
+  // Pricing needs the row's REAL current values -- only rows still in base.retainedRowIndexes have them
+  // available here (a row already removed by exact-duplicate collapse is, by definition, byte-identical
+  // across every column -- including pricing -- to the sibling that WAS kept, so it needs no separate
+  // lookup; the kept sibling's own priced-ness already represents it correctly).
+  const retainedRowByIndex = new Map<number, readonly string[]>();
+  base.retainedRowIndexes.forEach((rowIndex, position) => retainedRowByIndex.set(rowIndex, base.retainedRows[position]!));
+
   const domainDuplicateKeptRowIndexes = new Set<number>();
   const domainDuplicateRemovedRowIndexes = new Set<number>();
   const excludedDomainGroups: DomainDuplicateGroup[] = [];
+  const pricingProtectedGroups: DomainDuplicateGroup[] = [];
   for (const group of base.domainDuplicateGroups) {
-    if (excludedDomains?.has(group.normalizedDomain)) {
+    if (excludedDomains.has(group.normalizedDomain)) {
       excludedDomainGroups.push(group);
       continue;
     }
     const sorted = [...group.rowIndexes].sort((a, b) => a - b);
-    const [keep, ...extras] = sorted;
-    // `keep` (the group's lowest original row index) is always already present in base.retainedRowIndexes:
-    // if it were part of an exact-duplicate group, it would also be the LOWEST member there (it's the
-    // lowest in the superset), so buildCleaningResult()'s own exact-duplicate pass would already have kept
-    // it, never removed it. This is why the filter below only ever needs to REMOVE indexes, never add one
-    // back.
-    if (keep !== undefined) domainDuplicateKeptRowIndexes.add(keep);
-    for (const i of extras) domainDuplicateRemovedRowIndexes.add(i);
+
+    const pricedMembers = pricingColumnIndexes.length === 0 ? [] : sorted.filter((rowIndex) => {
+      const row = retainedRowByIndex.get(rowIndex);
+      return row ? isRowPriced(row, pricingColumnIndexes) : false;
+    });
+
+    if (pricedMembers.length >= 2) {
+      // "If both duplicates are protected deal/priced records, keep both for review" -- never auto-resolved.
+      pricingProtectedGroups.push(group);
+      continue;
+    }
+
+    // Exactly one priced member: THAT row must be kept, regardless of its row index -- "If a duplicate has
+    // one protected deal/priced record, remove only the other duplicate." Zero priced members: unchanged,
+    // deterministic fallback to the lowest original row index (same convention exact-duplicate collapse
+    // already uses).
+    const keep = pricedMembers.length === 1 ? pricedMembers[0]! : sorted[0]!;
+    const extras = sorted.filter((rowIndex) => rowIndex !== keep);
+    // `keep` is always already present in base.retainedRowIndexes: when it's the lowest-index fallback, see
+    // the proof this comment used to carry (it can't have been removed as an exact-duplicate extra, since
+    // it's the lowest in its own superset too); when it's the priced member, it was only ever selected
+    // because retainedRowByIndex (built FROM base.retainedRowIndexes) already had it.
+    domainDuplicateKeptRowIndexes.add(keep);
+    for (const rowIndex of extras) domainDuplicateRemovedRowIndexes.add(rowIndex);
   }
 
   // RECONCILIATION FIX (2026-09-21): a real, live-confirmed reporting defect -- a report built from
@@ -416,9 +490,11 @@ export function collapseDomainDuplicatesToOnePerDomain(base: CleaningResult, opt
   const manualReviewSet = new Set<number>();
   for (const flag of base.malformedUrlRows) manualReviewSet.add(flag.rowIndex);
   for (const flag of base.incompleteRows) manualReviewSet.add(flag.rowIndex);
-  // Excluded domain groups were deliberately left uncollapsed -- still genuinely ambiguous (same domain,
-  // differing fields), so they stay flagged for manual review exactly like the default (no-collapse) mode.
+  // Excluded domain groups and pricing-protected groups were deliberately left uncollapsed -- still
+  // genuinely ambiguous (same domain, differing fields, or two competing priced records), so they stay
+  // flagged for manual review exactly like the default (no-collapse) mode.
   for (const group of excludedDomainGroups) for (const i of group.rowIndexes) manualReviewSet.add(i);
+  for (const group of pricingProtectedGroups) for (const i of group.rowIndexes) manualReviewSet.add(i);
 
   const result: CleaningResult = {
     ...base,
@@ -427,7 +503,15 @@ export function collapseDomainDuplicatesToOnePerDomain(base: CleaningResult, opt
     manualReviewRowIndexes: Array.from(manualReviewSet).sort((a, b) => a - b),
   };
 
-  return { base, result, domainDuplicateKeptRowIndexes, domainDuplicateRemovedRowIndexes, domainDuplicateAdditionalRemovedRowIndexes, excludedDomainGroups };
+  return {
+    base,
+    result,
+    domainDuplicateKeptRowIndexes,
+    domainDuplicateRemovedRowIndexes,
+    domainDuplicateAdditionalRemovedRowIndexes,
+    excludedDomainGroups,
+    pricingProtectedGroups,
+  };
 }
 
 const FULLY_DEDUPED_AUDIT_CSV_COLUMNS = ["Category", "Original Row (data row #, header excluded)", "Matching Row(s)", "Duplicate Type", "Normalized Domain/URL", "Reason", "Proposed Action", "Final Disposition"];
@@ -461,12 +545,23 @@ export function buildFullyDedupedCleaningAuditCsv(base: CleaningResult, finalRet
     }
   }
 
+  // TRUTH-DRIVEN DISPOSITION (2026-09-24): rather than re-deriving "was this group collapsed?" purely from
+  // the excludedDomains parameter (which only knows about platform-domain exclusion, not the NEWER
+  // pricing-protection case -- see collapseDomainDuplicatesToOnePerDomain()'s own header), this checks each
+  // member's REAL final disposition against finalRetainedRowIndexes directly -- the actual source of truth
+  // -- so a group left alone for EITHER reason (known platform domain, or two-or-more already-priced
+  // members) is reported correctly without this function needing to know every possible protection reason.
   const domainFlaggedIndexes = new Set<number>();
   for (const group of base.domainDuplicateGroups) {
     const sorted = [...group.rowIndexes].sort((a, b) => a - b);
-    const [keptIndex, ...restIndexes] = sorted;
-    const isExcluded = excludedDomains?.has(group.normalizedDomain) ?? false;
-    if (isExcluded) {
+    const retainedMembers = sorted.filter((rowIndex) => finalRetainedRowIndexes.has(rowIndex));
+    const removedMembers = sorted.filter((rowIndex) => !finalRetainedRowIndexes.has(rowIndex));
+
+    if (removedMembers.length === 0) {
+      // Every member of this group survived -- either a known-platform-domain exclusion or a
+      // pricing-protection "keep both for review" case. excludedDomains is the one distinguishing signal
+      // available here; anything not on it that still wasn't collapsed is the pricing-protected case.
+      const isPlatformExcluded = excludedDomains?.has(group.normalizedDomain) ?? false;
       for (const rowIndex of sorted) {
         domainFlaggedIndexes.add(rowIndex);
         lines.push(
@@ -476,7 +571,9 @@ export function buildFullyDedupedCleaningAuditCsv(base: CleaningResult, finalRet
             sorted.filter((i) => i !== rowIndex).map((i) => i + 1).join(";"),
             "Domain/URL duplicate",
             group.normalizedDomain,
-            "Excluded from domain-level collapsing (known large platform domain) -- other fields differ.",
+            isPlatformExcluded
+              ? "Excluded from domain-level collapsing (known large platform domain) -- other fields differ."
+              : "Two or more records for this domain already carry real pricing/deal data -- kept both, never auto-resolved.",
             "Keep -- review manually",
             "Retained (flagged for review)",
           ]),
@@ -484,15 +581,19 @@ export function buildFullyDedupedCleaningAuditCsv(base: CleaningResult, finalRet
       }
       continue;
     }
-    for (const rowIndex of restIndexes) {
+
+    // Normal collapse: exactly one retained member (kept by the lowest-row-index rule, or because it was
+    // the group's one priced record -- either way, the real, current source of truth), the rest removed.
+    const keptIndex = retainedMembers[0]!;
+    for (const rowIndex of removedMembers) {
       lines.push(
         csvRow([
           "B_DOMAIN_DUPLICATE_REMOVED",
           String(rowIndex + 1),
-          String(keptIndex! + 1),
+          String(keptIndex + 1),
           "Domain/URL duplicate",
           group.normalizedDomain,
-          `Same normalized domain as data row ${keptIndex! + 1} -- kept exactly one record per domain.`,
+          `Same normalized domain as data row ${keptIndex + 1} -- kept exactly one record per domain.`,
           "Remove -- one unique record per domain retained",
           "Removed",
         ]),

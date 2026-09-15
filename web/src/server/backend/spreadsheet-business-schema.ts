@@ -86,8 +86,12 @@ const SCHEMA_HEADER_ALIASES: Readonly<Partial<Record<FinalBusinessSchemaColumn, 
   "Contact Email": ["contact email"],
   "Contact Name": ["contact name", "contact"],
   "Domain Age": ["domain age"],
-  "Admin Price": ["admin price"],
-  "Client Price": ["client price"],
+  // PLURAL VARIANT FIX (2026-09-24): a real, live-confirmed sheet header is "Admin Prices" (plural), which
+  // the singular-only alias never matched -- silently leaving admin-priced rows undetected as "priced" for
+  // destination-protection purposes. Both singular and plural aliases are tried (declared order still
+  // matters if a sheet somehow has both columns -- "admin price" wins first).
+  "Admin Price": ["admin price", "admin prices"],
+  "Client Price": ["client price", "client prices"],
   Profit: ["profit"],
   "Deal Status": ["deal status"],
   Notes: ["notes", "note"],
