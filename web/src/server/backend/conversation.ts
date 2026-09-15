@@ -45,6 +45,7 @@ async function getClm(): Promise<ClmBundle> {
         { AgentRegistry },
         { TagWeightedRoutingStrategy },
         { TaskRouter },
+        { RoutingRejectionTracker },
         { ComplianceValidator },
         { EscalationHandler },
         { TaskStateStore },
@@ -58,6 +59,7 @@ async function getClm(): Promise<ClmBundle> {
         importBackend("boss-agent/registry/agent-registry.js"),
         importBackend("boss-agent/routing/tag-weighted-routing-strategy.js"),
         importBackend("boss-agent/routing/task-router.js"),
+        importBackend("boss-agent/routing/routing-rejection-tracker.js"),
         importBackend("boss-agent/governance/compliance-validator.js"),
         importBackend("boss-agent/governance/escalation-handler.js"),
         importBackend("boss-agent/state/task-state-store.js"),
@@ -78,11 +80,20 @@ async function getClm(): Promise<ClmBundle> {
 
       const registry = await AgentRegistry.load(bossConfig.agentsDirectory);
       const routingStrategy = new TagWeightedRoutingStrategy(registry.list());
-      const taskRouter = new TaskRouter(registry, routingStrategy, {
-        autoAssignThreshold: bossConfig.autoAssignThreshold,
-        tieMargin: bossConfig.tieMargin,
-        maxCandidates: bossConfig.maxCandidates,
-      });
+      // Durable (survives a process restart / a different serverless
+      // instance) -- see routing-rejection-tracker.ts's own doc comment.
+      const rejectionTracker = new RoutingRejectionTracker(path.join(bossConfig.stateDirectory, "rejections"));
+      const taskRouter = new TaskRouter(
+        registry,
+        routingStrategy,
+        {
+          autoAssignThreshold: bossConfig.autoAssignThreshold,
+          tieMargin: bossConfig.tieMargin,
+          maxCandidates: bossConfig.maxCandidates,
+        },
+        rejectionTracker,
+        registry.getBossAgentSpec(),
+      );
 
       const escalations: RecordedEscalation[] = [];
       const approvalChannel = createWebApprovalChannel((event) => escalations.push(event));
@@ -139,4 +150,21 @@ export async function sendConversationMessage(
 export async function getSpecialistAgentSpec(agentId: string): Promise<SpecialistAgentSpec | undefined> {
   const { getAgentSpec } = await getClm();
   return getAgentSpec(agentId);
+}
+
+/**
+ * SYSTEM-READINESS EXECUTION FIX (2026-08-19): reuses the exact same real,
+ * pure detector task-router.ts already routes "boss_retained" through
+ * (src/boss-agent/routing/system-verification-intent-detector.js) so route.ts
+ * can tell "this boss_retained decision came from an explicit
+ * system-readiness verification request" apart from an ordinary meta-request
+ * about Boss's own routing machinery -- without importing routing logic
+ * directly (this file already owns the one real importBackend() path) and,
+ * critically, without touching task-router.ts's own routing decision at
+ * all. Read-only, pure, no side effects -- never influences or repeats the
+ * real RoutingDecision this module already produced.
+ */
+export async function isSystemVerificationRequest(message: string): Promise<boolean> {
+  const { isSystemVerificationIntent } = await importBackend("boss-agent/routing/system-verification-intent-detector.js");
+  return isSystemVerificationIntent(message);
 }

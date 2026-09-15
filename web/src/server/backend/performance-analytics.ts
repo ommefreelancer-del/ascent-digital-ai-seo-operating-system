@@ -12,6 +12,14 @@
 // reasoning about what the data means.
 
 import { getConnectionStatus, getOrSelectPrimarySite, querySearchAnalytics, type SearchAnalyticsRow } from "@/server/google-search-console";
+import {
+  getConnectionStatus as getBingConnectionStatus,
+  getOrSelectPrimarySite as getBingPrimarySite,
+  getQueryStats as getBingQueryStats,
+  getRankAndTrafficStats as getBingRankAndTrafficStats,
+  BingWebmasterAuthError,
+  type BingQueryStat,
+} from "@/server/bing-webmaster";
 
 function last28Days(): { startDate: string; endDate: string } {
   const end = new Date();
@@ -80,4 +88,81 @@ export async function buildSearchConsoleContext(userId: string): Promise<string>
   }
 
   return summarizeRows(rows, primarySite, startDate, endDate);
+}
+
+/**
+ * Builds a real, non-fabricated context block describing this user's actual
+ * Bing Webmaster Tools state -- the SAME pattern as
+ * buildSearchConsoleContext() above, but for a genuinely different provider
+ * (Microsoft, not Google). Deliberately never merged into the same text
+ * block or the same summary numbers as buildSearchConsoleContext(): every
+ * line is explicitly source-labeled "Bing Webmaster" so a reader (human or
+ * the specialist LLM consuming this) can never mistake one provider's real
+ * numbers for the other's.
+ *
+ * SCOPE BOUNDARY (explicit, per this integration's own design): this
+ * reports the verified site's OWN real query/click/impression history from
+ * Bing search -- never a keyword-volume database, keyword-difficulty score,
+ * or competitor data. Bing Webmaster is not a Semrush/Ahrefs replacement;
+ * this codebase has no real Semrush connection at all (DataForSEO is the
+ * real keyword/competitive-data provider here -- see server/dataforseo.ts),
+ * so "Semrush keyword metrics are unavailable" is this system's honest
+ * default state, not something this function needs to separately fabricate
+ * or suppress.
+ */
+export async function buildBingWebmasterContext(userId: string): Promise<string> {
+  const status = await getBingConnectionStatus(userId);
+  if (!status.connected) {
+    return "[Bing Webmaster integration status: NOT CONNECTED. Tell the user to go to Settings -> Integrations -> Connect Bing Webmaster Tools before real Bing search-performance data can be retrieved.]";
+  }
+
+  let primarySite: string | null;
+  try {
+    primarySite = await getBingPrimarySite(userId);
+  } catch (error) {
+    if (error instanceof BingWebmasterAuthError) {
+      return `[Bing Webmaster integration status: CONNECTED, but authorization was rejected (likely revoked or expired) -- ${error.message}. Tell the user to reconnect Bing Webmaster Tools in Settings.]`;
+    }
+    const reason = error instanceof Error ? error.message : "an unknown error";
+    return `[Bing Webmaster integration status: CONNECTED, but the real call to list sites failed: ${reason}. State this plainly to the user -- do not guess at data.]`;
+  }
+
+  if (!primarySite) {
+    return "[Bing Webmaster integration status: CONNECTED, but no site is verified in this Bing Webmaster account yet, so no data can be retrieved. Tell the user to verify a site in Bing Webmaster Tools, then ask again.]";
+  }
+
+  let queryStats: BingQueryStat[];
+  let trafficRows: Awaited<ReturnType<typeof getBingRankAndTrafficStats>>;
+  try {
+    [queryStats, trafficRows] = await Promise.all([getBingQueryStats(userId, primarySite), getBingRankAndTrafficStats(userId, primarySite)]);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "an unknown error";
+    return `[Bing Webmaster integration status: CONNECTED and verified for ${primarySite}, but the real API call failed: ${reason}. State this plainly to the user -- do not guess at data.]`;
+  }
+
+  if (queryStats.length === 0 && trafficRows.length === 0) {
+    return `[Bing Webmaster integration status: CONNECTED and verified for ${primarySite}. Real GetQueryStats/GetRankAndTrafficStats calls returned zero rows -- Bing has no recorded search performance for this site yet (common right after verification). State this honestly; do not fabricate numbers.]`;
+  }
+
+  const recentTraffic = trafficRows.slice(-28);
+  const trafficTotals = recentTraffic.reduce((acc, r) => ({ clicks: acc.clicks + r.clicks, impressions: acc.impressions + r.impressions }), { clicks: 0, impressions: 0 });
+
+  const topQueries = queryStats
+    .slice()
+    .sort((a, b) => b.clicks - a.clicks)
+    .slice(0, 10)
+    .map((q) => `  - "${q.query}": ${q.clicks} clicks, ${q.impressions} impressions, avg click position ${q.avgClickPosition}, avg impression position ${q.avgImpressionPosition}`)
+    .join("\n");
+
+  return [
+    `[Bing Webmaster integration status: CONNECTED and verified for ${primarySite}. This is REAL Bing Webmaster data -- a distinct source from Google Search Console above; never combine these numbers into one total.`,
+    recentTraffic.length > 0
+      ? `Real GetRankAndTrafficStats totals across the most recent ${recentTraffic.length} recorded day(s) on Bing: ${trafficTotals.clicks} clicks, ${trafficTotals.impressions} impressions.`
+      : "No GetRankAndTrafficStats rows are available yet.",
+    topQueries ? "Real GetQueryStats top queries by clicks (site's own real Bing search performance, not a keyword-volume database):" : "No GetQueryStats rows are available yet.",
+    topQueries,
+    "This is the verified site's OWN real Bing search performance and Bing-crawled inbound-link data only -- it is NOT a comprehensive keyword-volume database, keyword-difficulty score, competitor analysis, or a replacement for Semrush/Ahrefs. If asked for competitive keyword intelligence, state plainly that a dedicated provider (Semrush/Ahrefs) is required and is not fabricated here.]",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }

@@ -1,4 +1,5 @@
 import { db } from "@/server/db";
+import { encryptSecret, decryptSecret } from "@/server/credential-encryption";
 
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -73,10 +74,12 @@ export async function saveConnection(userId: string, tokens: TokenResponse) {
     throw new Error("Google did not return a refresh_token (expected with prompt=consent).");
   }
   const expiresAt = new Date(Date.now() + tokens.expires_in * 1000);
+  const encryptedAccessToken = encryptSecret(tokens.access_token);
+  const encryptedRefreshToken = encryptSecret(tokens.refresh_token);
   return db.googleSearchConsoleConnection.upsert({
     where: { userId },
-    update: { accessToken: tokens.access_token, refreshToken: tokens.refresh_token, scope: tokens.scope, expiresAt },
-    create: { userId, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, scope: tokens.scope, expiresAt },
+    update: { encryptedAccessToken, encryptedRefreshToken, scope: tokens.scope, expiresAt },
+    create: { userId, encryptedAccessToken, encryptedRefreshToken, scope: tokens.scope, expiresAt },
   });
 }
 
@@ -88,7 +91,7 @@ export async function getConnectionStatus(userId: string): Promise<{ connected: 
 export async function disconnect(userId: string): Promise<void> {
   const connection = await db.googleSearchConsoleConnection.findUnique({ where: { userId } });
   if (!connection) return;
-  await fetch(`${REVOKE_URL}?token=${encodeURIComponent(connection.refreshToken)}`, { method: "POST" }).catch(() => {
+  await fetch(`${REVOKE_URL}?token=${encodeURIComponent(decryptSecret(connection.encryptedRefreshToken))}`, { method: "POST" }).catch(() => {
     // Best-effort revoke -- Google's own token expiry/rotation makes this non-fatal either way.
   });
   await db.googleSearchConsoleConnection.delete({ where: { userId } });
@@ -99,7 +102,7 @@ export async function getValidAccessToken(userId: string): Promise<string | null
   const connection = await db.googleSearchConsoleConnection.findUnique({ where: { userId } });
   if (!connection) return null;
   if (connection.expiresAt.getTime() > Date.now() + 60_000) {
-    return connection.accessToken;
+    return decryptSecret(connection.encryptedAccessToken);
   }
 
   const res = await fetch(TOKEN_URL, {
@@ -108,7 +111,7 @@ export async function getValidAccessToken(userId: string): Promise<string | null
     body: new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID!,
       client_secret: process.env.GOOGLE_CLIENT_SECRET!,
-      refresh_token: connection.refreshToken,
+      refresh_token: decryptSecret(connection.encryptedRefreshToken),
       grant_type: "refresh_token",
     }),
   });
@@ -117,7 +120,7 @@ export async function getValidAccessToken(userId: string): Promise<string | null
   }
   const refreshed: { access_token: string; expires_in: number } = await res.json();
   const expiresAt = new Date(Date.now() + refreshed.expires_in * 1000);
-  await db.googleSearchConsoleConnection.update({ where: { userId }, data: { accessToken: refreshed.access_token, expiresAt } });
+  await db.googleSearchConsoleConnection.update({ where: { userId }, data: { encryptedAccessToken: encryptSecret(refreshed.access_token), expiresAt } });
   return refreshed.access_token;
 }
 

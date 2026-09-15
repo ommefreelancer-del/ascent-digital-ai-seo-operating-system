@@ -64,6 +64,10 @@ export type ContentGeneratorInput = z.infer<typeof contentGeneratorSchema>;
 export const chatMessageSchema = z.object({
   sessionId: z.string().optional(),
   message: z.string().trim().min(1, "Type a message."),
+  // WORKSPACE FILE ATTACHMENT CAPABILITY: a real, already-uploaded Attachment's id (see
+  // server/backend/attachments.ts) -- ownership is re-verified server-side in
+  // workspace/messages/route.ts before it is ever linked to a task; this schema only checks shape.
+  attachmentId: z.string().optional(),
 });
 export type ChatMessageInput = z.infer<typeof chatMessageSchema>;
 
@@ -96,6 +100,11 @@ export const googleSheetsValuesSchema = z.object({
 });
 export type GoogleSheetsValuesInput = z.infer<typeof googleSheetsValuesSchema>;
 
+export const googleSheetsWriteDestinationSchema = z.object({
+  spreadsheetId: z.string().trim().min(1, "Choose a spreadsheet."),
+});
+export type GoogleSheetsWriteDestinationInput = z.infer<typeof googleSheetsWriteDestinationSchema>;
+
 export const prospectSchema = z.object({
   domain: z.string().trim().min(1, "Enter a domain."),
   companyName: z.string().trim().max(200).optional().or(z.literal("")),
@@ -105,6 +114,20 @@ export const prospectSchema = z.object({
   notes: z.string().trim().max(2000).optional().or(z.literal("")),
 });
 export type ProspectInput = z.infer<typeof prospectSchema>;
+
+export const campaignTrackingSchema = z.object({
+  campaignName: z.string().trim().min(1, "Enter a campaign name."),
+  campaignUpdates: z
+    .array(
+      z.object({
+        date: z.string().trim().min(1, "Enter a date."),
+        description: z.string().trim().min(1, "Enter a description."),
+      }),
+    )
+    .max(50)
+    .optional(),
+});
+export type CampaignTrackingInput = z.infer<typeof campaignTrackingSchema>;
 
 export const prospectUpdateSchema = z.object({
   qualificationStatus: z.enum(["pending", "qualified", "rejected"]).optional(),
@@ -197,6 +220,12 @@ export const wordPressPublishSchema = z.object({
 });
 export type WordPressPublishInput = z.infer<typeof wordPressPublishSchema>;
 
+/** Requires an explicit `{ confirm: true }` body on BOTH approve and reject -- this is never inferred from conversational text or any other implicit signal (a real production-affecting decision must be a real, deliberate client action). */
+export const remediationApprovalDecisionSchema = z.object({
+  confirm: z.literal(true, { message: "Explicit confirmation is required (confirm: true)." }),
+});
+export type RemediationApprovalDecisionInput = z.infer<typeof remediationApprovalDecisionSchema>;
+
 export const wordPressListContentSchema = z.object({
   type: wordPressContentTypeSchema,
   status: z.string().trim().max(40).optional(),
@@ -205,6 +234,19 @@ export const wordPressListContentSchema = z.object({
   perPage: z.coerce.number().int().min(1).max(100).default(10),
 });
 export type WordPressListContentInput = z.infer<typeof wordPressListContentSchema>;
+
+export const googleAnalyticsSelectPropertySchema = z.object({
+  propertyId: z.string().trim().min(1, "Choose a property."),
+  displayName: z.string().trim().max(200).optional().or(z.literal("")),
+});
+export type GoogleAnalyticsSelectPropertyInput = z.infer<typeof googleAnalyticsSelectPropertySchema>;
+
+export const googleAnalyticsReportSchema = z.object({
+  propertyId: z.string().trim().min(1, "Choose a property."),
+  startDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD."),
+  endDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD."),
+});
+export type GoogleAnalyticsReportInput = z.infer<typeof googleAnalyticsReportSchema>;
 
 export const seoPerformanceReportSchema = z.object({
   projectId: z.string().optional(),

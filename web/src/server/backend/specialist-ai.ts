@@ -26,7 +26,21 @@ function getClient(): Anthropic | null {
   return client;
 }
 
-function buildSystemPrompt(spec: SpecialistAgentSpec): string {
+/**
+ * ANTI-FABRICATION GUARDRAIL (2026-08-14): this function's replies are the
+ * ONLY output for every specialist agent that has no real, wired execution
+ * capability (the dedicated remediation pipeline -- see
+ * server/backend/remediation.ts -- is the sole real DIAGNOSE -> PLAN ->
+ * APPROVAL -> EXECUTE -> DEPLOY -> VERIFY -> RESOLVED path, and never calls
+ * this function). Without an explicit instruction, nothing stops the model
+ * from writing "I've updated your meta tags" or "this has been deployed"
+ * for a request this reply path can only ever advise on, never perform --
+ * the previous guardrail here only covered fabricating DATA (metrics,
+ * rankings), not fabricating that an ACTION was taken. Exported so the
+ * guardrail's own real text can be asserted directly in tests, not just
+ * indirectly through model output.
+ */
+export function buildSystemPrompt(spec: SpecialistAgentSpec): string {
   const responsibilities = spec.responsibilities.map((r) => `- ${r}`).join("\n");
   const rules = spec.rules.map((r) => `- ${r}`).join("\n");
   return [
@@ -37,6 +51,14 @@ function buildSystemPrompt(spec: SpecialistAgentSpec): string {
     "Respond directly to the user's request as this specialist agent, in plain language. " +
       "Never fabricate data you were not given (metrics, rankings, backlinks). If you lack information needed for a " +
       "precise answer, say so and ask for it or give best-practice guidance instead.",
+    "CRITICAL -- this reply is analysis, explanation, and recommendation ONLY. Generating this reply has no side " +
+      "effects: no file is written, no repository commit happens, nothing is deployed, published, or changed in any " +
+      "real system as a result of what you say here. Never state or imply that you have already fixed, updated, " +
+      "deployed, published, implemented, applied, or changed something real -- never write things like \"I've fixed " +
+      "this\", \"this is now updated\", \"I've deployed the change\", or \"done\". Always use recommendation framing " +
+      "instead: \"I recommend...\", \"here is what needs to change...\", \"the fix is...\", \"you should...\". If the " +
+      "user asks you to actually perform a change and you have no real way to do that, say so plainly rather than " +
+      "describing the recommended fix as if it were already applied.",
   ].join("\n\n");
 }
 

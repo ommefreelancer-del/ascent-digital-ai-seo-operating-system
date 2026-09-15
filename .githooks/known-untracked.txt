@@ -374,7 +374,6 @@ web/tests/server/backend/spreadsheet-cleaning-artifacts.test.ts
 web/tests/server/backend/spreadsheet-cleaning.test.ts
 web/tests/server/backend/spreadsheet-google-sheets-writeback.test.ts
 web/tests/server/backend/spreadsheet-hard-guard.test.ts
-web/tests/server/backend/spreadsheet-processing.test.ts
 web/tests/server/backend/spreadsheet-reader.test.ts
 web/tests/server/backend/system-readiness.test.ts
 web/tests/server/backend/web-development.test.ts
@@ -402,7 +401,6 @@ web/tests/server/rate-limit.test.ts
 web/tests/server/rbac.test.ts
 web/tests/server/workspace-messages-attachment-wiring.test.ts
 web/tests/server/workspace-messages-competitor-intelligence-wiring.test.ts
-web/tests/server/workspace-messages-existing-output-cleanup-dispatch.test.ts
 web/tests/server/workspace-messages-keyword-research-wiring.test.ts
 web/tests/server/workspace-messages-on-page-seo-evidence-wiring.test.ts
 web/tests/server/workspace-messages-reaudit-verify-wiring.test.ts

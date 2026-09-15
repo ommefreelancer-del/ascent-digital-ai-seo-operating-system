@@ -18,9 +18,25 @@
 // Responsibilities cover both ("Recommend and implement internal linking
 // between related pages" and "Optimize title tags and meta descriptions"),
 // so that one real agent fills both roles in the requested workflow.
+//
+// KEYWORD RESEARCH -> CONTENT WIRING FIX (2026-08-21): stages 1 (Keyword
+// Research) and 3 (SEO Content) no longer role-play those two specialists
+// via generateSpecialistReply() -- they now dispatch to the real
+// KeywordResearchAgent/ContentStrategyAgent/SeoContentAgent classes via
+// content.ts's researchKeywordsAndGenerateContentFromMessage() (the SAME
+// real agents/providers the dedicated /api/content form already uses).
+// Keyword metrics come only from whatever KeywordDataProvider is actually
+// configured for that agent -- honestly null if none is, never an LLM
+// guess -- and the real structured keywordResearch/contentStrategy objects
+// (not re-derived text) are what SEO Content Agent's real developContent()
+// call consumes. Stages 2 (SEO Strategy), 4 (On-Page SEO), and 5 (Guest
+// Posting) are separate specialists not implicated by this fix and remain
+// real generateSpecialistReply() calls exactly as before.
 
 import { getSpecialistAgentSpec } from "./conversation";
 import { generateSpecialistReply, type SpecialistAgentSpec } from "./specialist-ai";
+import { researchKeywordsAndGenerateContentFromMessage, summarizeKeywordResearchForChat, summarizeSeoContentForChat } from "./content";
+import type { SeoContentResult } from "./types";
 
 /** The only RoutingDecision.assignedAgentId that triggers this pipeline -- every other agent id is unaffected and still gets the single generateSpecialistReply() call it always has. */
 export const CONTENT_PIPELINE_ENTRY_AGENT_ID = "seo-content-agent";
@@ -55,6 +71,16 @@ export interface PipelineStepTrace {
 export interface ContentPipelineResult {
   readonly finalReply: string;
   readonly trace: readonly PipelineStepTrace[];
+  /**
+   * STEP 6 PRODUCTION HARDENING (2026-08-21): the real, structured
+   * SeoContentResult the pipeline's stage 3 (SEO Content) actually produced
+   * -- exposed so the caller (api/workspace/messages/route.ts) can persist
+   * it into the existing ContentDraft library, the same way the dedicated
+   * /api/content form already does. Never a re-derived or fabricated
+   * summary -- the exact same object researchKeywordsAndGenerateContentFromMessage()
+   * returned.
+   */
+  readonly content: SeoContentResult;
 }
 
 async function requireSpec(agentId: string): Promise<SpecialistAgentSpec> {
@@ -100,23 +126,37 @@ async function runStage(
  * linking + meta title/description) -> Guest Posting (only when the request
  * asks for it) -> a deterministic combined result.
  *
- * Every stage is a real generateSpecialistReply() call against that
- * specialist's own Agents/*.md spec -- nothing here is fabricated, and each
- * stage's real output is passed forward as real context to the next.
+ * Stages 1 (Keyword Research) and 3 (SEO Content) dispatch to the real
+ * KeywordResearchAgent/SeoContentAgent classes (see content.ts's
+ * researchKeywordsAndGenerateContentFromMessage()) -- never LLM role-play.
+ * Stages 2 (SEO Strategy), 4 (On-Page SEO), and 5 (Guest Posting) are real
+ * generateSpecialistReply() calls against that specialist's own Agents/*.md
+ * spec. Nothing here is fabricated, and each stage's real output is passed
+ * forward as real context to the next.
  */
 export async function runContentGenerationPipeline(userMessage: string, routingRationale: string): Promise<ContentPipelineResult> {
   const trace: PipelineStepTrace[] = [];
   const upstream: Array<{ title: string; output: string }> = [];
 
-  const kw = await runStage(
-    1,
-    KEYWORD_RESEARCH_AGENT_ID,
-    userMessage,
-    `${routingRationale} Automated content pipeline, stage 1: real keyword research for this request.`,
-    upstream,
+  // Stages 1 + 3: dispatch to the REAL Keyword Research Agent and the real
+  // SEO Content Agent -- the same real agent classes/providers content.ts
+  // already wires for the dedicated /api/content form (via the SAME cached
+  // getAgents() instances) -- instead of an LLM role-playing either
+  // specialist. Keyword metrics come only from whatever KeywordDataProvider
+  // is actually configured for that agent (honestly null if none is,
+  // never fabricated); the real, structured keywordResearch/contentStrategy
+  // objects (not re-derived text) are what SEO Content Agent's real
+  // developContent() call actually consumes.
+  const kwSpec = await requireSpec(KEYWORD_RESEARCH_AGENT_ID);
+  console.log(`[content-pipeline] Stage 1: invoking ${kwSpec.title} (${KEYWORD_RESEARCH_AGENT_ID}) via the real agent/provider, not LLM role-play.`);
+  const contentSpec = await requireSpec(CONTENT_PIPELINE_ENTRY_AGENT_ID);
+  const real = await researchKeywordsAndGenerateContentFromMessage(userMessage);
+  console.log(
+    `[content-pipeline] Stage 1: ${kwSpec.title} produced ${real.keywordResearch.classifiedKeywords.length} classified keyword(s), metricsAvailable=${real.keywordResearch.metricsAvailable}.`,
   );
-  trace.push({ stage: 1, agentId: KEYWORD_RESEARCH_AGENT_ID, agentTitle: kw.spec.title, input: kw.input, output: kw.output, nextAgentId: SEO_STRATEGY_AGENT_ID });
-  upstream.push({ title: kw.spec.title, output: kw.output });
+  const kwOutput = summarizeKeywordResearchForChat(real.keywordResearch);
+  trace.push({ stage: 1, agentId: KEYWORD_RESEARCH_AGENT_ID, agentTitle: kwSpec.title, input: userMessage, output: kwOutput, nextAgentId: SEO_STRATEGY_AGENT_ID });
+  upstream.push({ title: kwSpec.title, output: kwOutput });
 
   const strategy = await runStage(
     2,
@@ -128,16 +168,13 @@ export async function runContentGenerationPipeline(userMessage: string, routingR
   trace.push({ stage: 2, agentId: SEO_STRATEGY_AGENT_ID, agentTitle: strategy.spec.title, input: strategy.input, output: strategy.output, nextAgentId: CONTENT_PIPELINE_ENTRY_AGENT_ID });
   upstream.push({ title: strategy.spec.title, output: strategy.output });
 
-  const content = await runStage(
-    3,
-    CONTENT_PIPELINE_ENTRY_AGENT_ID,
-    userMessage,
-    `${routingRationale} Automated content pipeline, stage 3: write the actual content using the real keyword research and strategy above.`,
-    upstream,
+  console.log(
+    `[content-pipeline] Stage 3: invoking ${contentSpec.title} (${CONTENT_PIPELINE_ENTRY_AGENT_ID}) via the real agent, not LLM role-play. Produced ${real.content.contentDrafts.length} draft(s), dataAvailable=${real.content.dataAvailable}.`,
   );
+  const contentOutput = summarizeSeoContentForChat(real.content);
   const needsGuestPosting = needsGuestPostingStage(userMessage);
-  trace.push({ stage: 3, agentId: CONTENT_PIPELINE_ENTRY_AGENT_ID, agentTitle: content.spec.title, input: content.input, output: content.output, nextAgentId: ON_PAGE_SEO_AGENT_ID });
-  upstream.push({ title: content.spec.title, output: content.output });
+  trace.push({ stage: 3, agentId: CONTENT_PIPELINE_ENTRY_AGENT_ID, agentTitle: contentSpec.title, input: userMessage, output: contentOutput, nextAgentId: ON_PAGE_SEO_AGENT_ID });
+  upstream.push({ title: contentSpec.title, output: contentOutput });
 
   const onPage = await runStage(
     4,
@@ -175,14 +212,14 @@ export async function runContentGenerationPipeline(userMessage: string, routingR
     "Boss Agent routed this request to the SEO Content Agent, which automatically ran the full internal " +
       "specialist pipeline below -- no intermediate keyword or strategy questions were needed.",
     "",
-    `## 1. Keyword Research (${kw.spec.title})`,
-    kw.output,
+    `## 1. Keyword Research (${kwSpec.title})`,
+    kwOutput,
     "",
     `## 2. SEO Strategy (${strategy.spec.title})`,
     strategy.output,
     "",
-    `## 3. Content (${content.spec.title})`,
-    content.output,
+    `## 3. Content (${contentSpec.title})`,
+    contentOutput,
     "",
     `## 4. Internal Linking & Metadata (${onPage.spec.title})`,
     onPage.output,
@@ -191,5 +228,5 @@ export async function runContentGenerationPipeline(userMessage: string, routingR
     sections.push("", `## 5. Guest Posting & Outreach (${guestPosting.spec.title})`, guestPosting.output);
   }
 
-  return { finalReply: sections.join("\n"), trace };
+  return { finalReply: sections.join("\n"), trace, content: real.content };
 }
