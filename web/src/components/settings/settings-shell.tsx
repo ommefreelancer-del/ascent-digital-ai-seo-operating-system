@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useTheme } from "next-themes";
 import { useSearchParams } from "next/navigation";
-import { AlertTriangle, Check, Copy, ExternalLink, KeyRound, Laptop, Link2, Moon, Plus, Search, Sun, Trash2, Unlink } from "lucide-react";
+import { AlertTriangle, Check, Copy, ExternalLink, Globe, KeyRound, Laptop, Link2, Moon, Plus, Search, Sun, Trash2, Unlink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
 import { cn, formatRelativeTime } from "@/lib/utils";
-import { apiKeySchema, profileSchema, urlInspectionSchema } from "@/lib/validators";
+import { apiKeySchema, profileSchema, urlInspectionSchema, googleSheetsValuesSchema, wordPressConnectSchema, wordPressManualConnectSchema } from "@/lib/validators";
 
 interface UserSettings {
   name: string;
@@ -39,10 +39,18 @@ export function SettingsShell({
   user,
   initialApiKeys,
   initialGoogleSearchConsole,
+  initialGoogleSheets,
+  initialGmail,
+  initialPixabay,
+  initialWordPress,
 }: {
   user: UserSettings;
   initialApiKeys: ApiKeyItem[];
   initialGoogleSearchConsole: { connected: boolean; connectedAt?: string };
+  initialGoogleSheets: { connected: boolean; connectedAt?: string };
+  initialGmail: { connected: boolean; connectedAt?: string };
+  initialPixabay: { connected: boolean };
+  initialWordPress: { connected: boolean; provider?: "self-hosted" | "wordpress-com"; siteUrl?: string; siteName?: string; connectedAt?: string; needsSiteSelection?: boolean };
 }) {
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = React.useState(searchParams.get("tab") === "integrations" ? "integrations" : "profile");
@@ -76,7 +84,13 @@ export function SettingsShell({
         <PlaceholderCard title="Billing" message="Billing and subscription management is coming soon. No payment provider is connected yet." />
       </TabsContent>
       <TabsContent value="integrations">
-        <IntegrationsCard initial={initialGoogleSearchConsole} />
+        <IntegrationsCard
+          initial={initialGoogleSearchConsole}
+          initialGoogleSheets={initialGoogleSheets}
+          initialGmail={initialGmail}
+          initialPixabay={initialPixabay}
+          initialWordPress={initialWordPress}
+        />
       </TabsContent>
     </Tabs>
   );
@@ -425,12 +439,34 @@ function ApiKeysCard({ initialKeys }: { initialKeys: ApiKeyItem[] }) {
   );
 }
 
-function IntegrationsCard({ initial }: { initial: { connected: boolean; connectedAt?: string } }) {
+function IntegrationsCard({
+  initial,
+  initialGoogleSheets,
+  initialGmail,
+  initialPixabay,
+  initialWordPress,
+}: {
+  initial: { connected: boolean; connectedAt?: string };
+  initialGoogleSheets: { connected: boolean; connectedAt?: string };
+  initialGmail: { connected: boolean; connectedAt?: string };
+  initialPixabay: { connected: boolean };
+  initialWordPress: { connected: boolean; provider?: "self-hosted" | "wordpress-com"; siteUrl?: string; siteName?: string; connectedAt?: string; needsSiteSelection?: boolean };
+}) {
   const { toast } = useToast();
   const searchParams = useSearchParams();
   const [status, setStatus] = React.useState(initial);
   const [pending, setPending] = React.useState(false);
+  const [sheetsStatus, setSheetsStatus] = React.useState(initialGoogleSheets);
+  const [sheetsPending, setSheetsPending] = React.useState(false);
+  const [gmailStatus, setGmailStatus] = React.useState(initialGmail);
+  const [gmailPending, setGmailPending] = React.useState(false);
+  const pixabayStatus = initialPixabay;
+  const [wordPressStatus, setWordPressStatus] = React.useState(initialWordPress);
+  const [wordPressPending, setWordPressPending] = React.useState(false);
+  const wordPressNotified = React.useRef(false);
   const notified = React.useRef(false);
+  const sheetsNotified = React.useRef(false);
+  const gmailNotified = React.useRef(false);
 
   React.useEffect(() => {
     if (notified.current) return;
@@ -448,6 +484,66 @@ function IntegrationsCard({ initial }: { initial: { connected: boolean; connecte
     if (gsc === "connected") setStatus({ connected: true, connectedAt: new Date().toISOString() });
   }, [searchParams, toast]);
 
+  React.useEffect(() => {
+    if (sheetsNotified.current) return;
+    const googleSheets = searchParams.get("google_sheets");
+    if (!googleSheets) return;
+    sheetsNotified.current = true;
+    const messages: Record<string, { title: string; variant?: "destructive" }> = {
+      connected: { title: "Google Sheets connected" },
+      denied: { title: "Connection cancelled", variant: "destructive" },
+      invalid_state: { title: "Connection failed -- please try again", variant: "destructive" },
+      error: { title: "Connection failed -- please try again", variant: "destructive" },
+    };
+    const message = messages[googleSheets];
+    if (message) toast({ title: message.title, variant: message.variant });
+    if (googleSheets === "connected") setSheetsStatus({ connected: true, connectedAt: new Date().toISOString() });
+  }, [searchParams, toast]);
+
+  React.useEffect(() => {
+    if (gmailNotified.current) return;
+    const gmail = searchParams.get("gmail");
+    if (!gmail) return;
+    gmailNotified.current = true;
+    const messages: Record<string, { title: string; variant?: "destructive" }> = {
+      connected: { title: "Gmail connected" },
+      denied: { title: "Connection cancelled", variant: "destructive" },
+      invalid_state: { title: "Connection failed -- please try again", variant: "destructive" },
+      error: { title: "Connection failed -- please try again", variant: "destructive" },
+    };
+    const message = messages[gmail];
+    if (message) toast({ title: message.title, variant: message.variant });
+    if (gmail === "connected") setGmailStatus({ connected: true, connectedAt: new Date().toISOString() });
+  }, [searchParams, toast]);
+
+  React.useEffect(() => {
+    if (wordPressNotified.current) return;
+    const wordpress = searchParams.get("wordpress");
+    if (!wordpress) return;
+    wordPressNotified.current = true;
+    const errorDetail = searchParams.get("wordpress_error");
+    const messages: Record<string, { title: string; variant?: "destructive" }> = {
+      connected: { title: "WordPress connected" },
+      connected_no_sites: { title: "WordPress.com connected -- this account has no sites yet" },
+      select_site: { title: "WordPress.com connected -- choose which site to use" },
+      denied: { title: "Connection cancelled", variant: "destructive" },
+      invalid_state: { title: "Connection failed -- please try again", variant: "destructive" },
+      invalid_site: { title: errorDetail ?? "That doesn't look like a reachable WordPress site", variant: "destructive" },
+      error: { title: errorDetail ?? "Connection failed -- please try again", variant: "destructive" },
+    };
+    const message = messages[wordpress];
+    if (message) toast({ title: message.title, variant: message.variant });
+    if (wordpress === "connected" || wordpress === "connected_no_sites" || wordpress === "select_site") {
+      // The real siteUrl/siteName/needsSiteSelection aren't in the redirect
+      // query string (only a status flag is) -- refetch the real status
+      // rather than guess them.
+      fetch("/api/integrations/wordpress")
+        .then((res) => res.json())
+        .then((data) => setWordPressStatus(data))
+        .catch(() => {});
+    }
+  }, [searchParams, toast]);
+
   async function disconnect() {
     if (!confirm("Disconnect Google Search Console? You'll need to reconnect to access Search Console data again.")) return;
     setPending(true);
@@ -460,6 +556,51 @@ function IntegrationsCard({ initial }: { initial: { connected: boolean; connecte
       toast({ title: "Couldn't disconnect", description: "Please try again.", variant: "destructive" });
     } finally {
       setPending(false);
+    }
+  }
+
+  async function disconnectSheets() {
+    if (!confirm("Disconnect Google Sheets? You'll need to reconnect to access your spreadsheets again.")) return;
+    setSheetsPending(true);
+    try {
+      const res = await fetch("/api/integrations/google-sheets", { method: "DELETE" });
+      if (!res.ok) throw new Error("Disconnect failed");
+      setSheetsStatus({ connected: false });
+      toast({ title: "Google Sheets disconnected" });
+    } catch {
+      toast({ title: "Couldn't disconnect", description: "Please try again.", variant: "destructive" });
+    } finally {
+      setSheetsPending(false);
+    }
+  }
+
+  async function disconnectGmail() {
+    if (!confirm("Disconnect Gmail? Prospect outreach drafts and sending will be unavailable until you reconnect.")) return;
+    setGmailPending(true);
+    try {
+      const res = await fetch("/api/integrations/gmail", { method: "DELETE" });
+      if (!res.ok) throw new Error("Disconnect failed");
+      setGmailStatus({ connected: false });
+      toast({ title: "Gmail disconnected" });
+    } catch {
+      toast({ title: "Couldn't disconnect", description: "Please try again.", variant: "destructive" });
+    } finally {
+      setGmailPending(false);
+    }
+  }
+
+  async function disconnectWordPress() {
+    if (!confirm("Disconnect WordPress? Draft creation and publishing will be unavailable until you reconnect.")) return;
+    setWordPressPending(true);
+    try {
+      const res = await fetch("/api/integrations/wordpress", { method: "DELETE" });
+      if (!res.ok) throw new Error("Disconnect failed");
+      setWordPressStatus({ connected: false });
+      toast({ title: "WordPress disconnected" });
+    } catch {
+      toast({ title: "Couldn't disconnect", description: "Please try again.", variant: "destructive" });
+    } finally {
+      setWordPressPending(false);
     }
   }
 
@@ -492,14 +633,451 @@ function IntegrationsCard({ initial }: { initial: { connected: boolean; connecte
           )}
         </div>
         {status.connected ? <UrlInspectionTool /> : null}
+
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-3">
+          <div>
+            <p className="text-sm font-medium">Google Sheets</p>
+            <p className="text-xs text-muted-foreground">
+              {sheetsStatus.connected
+                ? `Connected${sheetsStatus.connectedAt ? ` · ${formatRelativeTime(sheetsStatus.connectedAt)}` : ""}`
+                : "Not connected -- read-only access to your spreadsheets."}
+            </p>
+          </div>
+          {sheetsStatus.connected ? (
+            <Button size="sm" variant="outline" onClick={disconnectSheets} disabled={sheetsPending} loading={sheetsPending}>
+              <Unlink className="h-3.5 w-3.5" /> Disconnect
+            </Button>
+          ) : (
+            <Button size="sm" asChild>
+              <a href="/api/integrations/google-sheets/connect">
+                <Link2 className="h-3.5 w-3.5" /> Connect
+              </a>
+            </Button>
+          )}
+        </div>
+        {sheetsStatus.connected ? <GoogleSheetsTool /> : null}
+
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-3">
+          <div>
+            <p className="text-sm font-medium">Gmail</p>
+            <p className="text-xs text-muted-foreground">
+              {gmailStatus.connected
+                ? `Connected${gmailStatus.connectedAt ? ` · ${formatRelativeTime(gmailStatus.connectedAt)}` : ""}`
+                : "Not connected -- lets ADASOS prepare outreach drafts for your review. Nothing is ever sent without your explicit approval."}
+            </p>
+          </div>
+          {gmailStatus.connected ? (
+            <Button size="sm" variant="outline" onClick={disconnectGmail} disabled={gmailPending} loading={gmailPending}>
+              <Unlink className="h-3.5 w-3.5" /> Disconnect
+            </Button>
+          ) : (
+            <Button size="sm" asChild>
+              <a href="/api/integrations/gmail/connect">
+                <Link2 className="h-3.5 w-3.5" /> Connect
+              </a>
+            </Button>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-border px-3 py-3">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">WordPress</p>
+              <p className="text-xs text-muted-foreground">
+                {wordPressStatus.connected
+                  ? `Connected to ${wordPressStatus.siteName || wordPressStatus.siteUrl}${wordPressStatus.connectedAt ? ` · ${formatRelativeTime(wordPressStatus.connectedAt)}` : ""}`
+                  : wordPressStatus.needsSiteSelection
+                    ? "WordPress.com connected -- choose which site ADASOS should use below."
+                    : "Not connected -- lets ADASOS prepare draft posts/pages for your review. Nothing is ever published without your explicit approval."}
+              </p>
+            </div>
+            {wordPressStatus.connected ? (
+              <Button size="sm" variant="outline" onClick={disconnectWordPress} disabled={wordPressPending} loading={wordPressPending}>
+                <Unlink className="h-3.5 w-3.5" /> Disconnect
+              </Button>
+            ) : null}
+          </div>
+          {!wordPressStatus.connected && wordPressStatus.needsSiteSelection ? (
+            <WordPressSitePicker onSelected={(site) => setWordPressStatus({ connected: true, provider: "wordpress-com", siteUrl: site.url, siteName: site.name, connectedAt: new Date().toISOString() })} />
+          ) : null}
+          {!wordPressStatus.connected && !wordPressStatus.needsSiteSelection ? <WordPressConnectForm /> : null}
+        </div>
+
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-3">
+          <div>
+            <p className="text-sm font-medium">Pixabay</p>
+            <p className="text-xs text-muted-foreground">
+              {pixabayStatus.connected
+                ? "Connected -- royalty-free stock image & video search for the Graphic Design Agent."
+                : "Not connected -- set PIXABAY_API_KEY in the server environment to enable stock image & video search."}
+            </p>
+          </div>
+          <Badge variant={pixabayStatus.connected ? "success" : "secondary"}>{pixabayStatus.connected ? "Connected" : "Not connected"}</Badge>
+        </div>
+
         <div className="border-t border-border pt-4">
           <Badge variant="secondary" className="mb-2">
             Coming soon
           </Badge>
-          <p className="text-sm text-muted-foreground">Analytics and CMS platform integrations are coming soon.</p>
+          <p className="text-sm text-muted-foreground">CMS platform integrations are coming soon.</p>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Site URL entry + "Connect" (redirects into the real
+ * wp-admin/authorize-application.php on the user's own site -- WordPress
+ * core's built-in consent screen, no plugin) plus a manual-entry fallback
+ * for sites that don't expose that redirect. Neither path ever sends the
+ * resulting Application Password anywhere but this form's own POST to our
+ * server -- it is never rendered back or logged.
+ */
+function WordPressConnectForm() {
+  const { toast } = useToast();
+  const [siteUrl, setSiteUrl] = React.useState("");
+  const [error, setError] = React.useState<string | null>(null);
+  const [selfHostedOpen, setSelfHostedOpen] = React.useState(false);
+  const [manualOpen, setManualOpen] = React.useState(false);
+  const [username, setUsername] = React.useState("");
+  const [appPassword, setAppPassword] = React.useState("");
+  const [connecting, setConnecting] = React.useState(false);
+
+  function connect(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const parsed = wordPressConnectSchema.safeParse({ siteUrl });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? "Enter your WordPress site URL.");
+      return;
+    }
+    window.location.href = `/api/integrations/wordpress/connect?siteUrl=${encodeURIComponent(parsed.data.siteUrl)}`;
+  }
+
+  async function connectManually(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const parsed = wordPressManualConnectSchema.safeParse({ siteUrl, username, appPassword });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? "Please check the form and try again.");
+      return;
+    }
+    setConnecting(true);
+    try {
+      const res = await fetch("/api/integrations/wordpress/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed.data),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Could not connect to WordPress.");
+      window.location.href = "/settings?tab=integrations&wordpress=connected";
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not connect to WordPress.");
+      toast({ title: "Couldn't connect", description: "Please check the site URL and Application Password.", variant: "destructive" });
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 space-y-2 border-t border-border pt-3">
+      <Button size="sm" asChild>
+        <a href="/api/integrations/wordpress/wpcom/connect">
+          <Globe className="h-3.5 w-3.5" /> Connect with WordPress.com
+        </a>
+      </Button>
+      <p className="text-xs text-muted-foreground">
+        One click -- ADASOS automatically discovers which site(s) your WordPress.com account manages, no URL to type.
+      </p>
+
+      <button type="button" className="text-xs text-muted-foreground underline hover:text-foreground" onClick={() => setSelfHostedOpen((v) => !v)}>
+        {selfHostedOpen ? "Hide self-hosted option" : "Self-hosted WordPress instead?"}
+      </button>
+      {selfHostedOpen ? (
+        <div className="space-y-2 rounded-md bg-muted/40 p-2.5">
+          <form onSubmit={connect} className="flex items-center gap-2">
+            <Input value={siteUrl} onChange={(e) => setSiteUrl(e.target.value)} placeholder="https://yoursite.com" aria-label="WordPress site URL" />
+            <Button type="submit" size="sm" variant="outline">
+              <Link2 className="h-3.5 w-3.5" /> Connect
+            </Button>
+          </form>
+          {error ? (
+            <p className="flex items-center gap-1.5 text-xs text-destructive">
+              <AlertTriangle className="h-3.5 w-3.5" /> {error}
+            </p>
+          ) : null}
+          <button type="button" className="text-xs text-muted-foreground underline hover:text-foreground" onClick={() => setManualOpen((v) => !v)}>
+            {manualOpen ? "Hide manual connection" : "My site doesn't support the redirect -- connect manually"}
+          </button>
+          {manualOpen ? (
+            <form onSubmit={connectManually} className="space-y-2 rounded-md bg-background p-2.5">
+              <p className="text-xs text-muted-foreground">
+                Generate an Application Password in wp-admin (Users → your profile → Application Passwords), then paste it here.
+              </p>
+              <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="WordPress username" aria-label="WordPress username" />
+              <Input
+                type="password"
+                value={appPassword}
+                onChange={(e) => setAppPassword(e.target.value)}
+                placeholder="xxxx xxxx xxxx xxxx xxxx xxxx"
+                aria-label="Application Password"
+              />
+              <Button type="submit" size="sm" variant="outline" loading={connecting} disabled={connecting}>
+                <Link2 className="h-3.5 w-3.5" /> Connect manually
+              </Button>
+            </form>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+interface WordPressComSite {
+  id: string;
+  url: string;
+  name: string;
+}
+
+/** Shown when a WordPress.com account is connected but manages more than one site -- lists the account's real sites (fetched live) and lets the user pick which one ADASOS should use. */
+function WordPressSitePicker({ onSelected }: { onSelected: (site: WordPressComSite) => void }) {
+  const { toast } = useToast();
+  const [sites, setSites] = React.useState<WordPressComSite[] | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [selecting, setSelecting] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    setLoading(true);
+    fetch("/api/integrations/wordpress/wpcom/sites")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.error) throw new Error(data.error);
+        setSites(data.sites);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Could not list your WordPress.com sites."))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function select(site: WordPressComSite) {
+    setSelecting(site.id);
+    try {
+      const res = await fetch("/api/integrations/wordpress/wpcom/select-site", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ siteId: site.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Could not select this site.");
+      onSelected(site);
+      toast({ title: `Using ${site.name}` });
+    } catch (err) {
+      toast({ title: "Couldn't select this site", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setSelecting(null);
+    }
+  }
+
+  return (
+    <div className="mt-3 space-y-2 border-t border-border pt-3">
+      {loading ? <p className="text-xs text-muted-foreground">Loading your sites…</p> : null}
+      {error ? (
+        <p className="flex items-center gap-1.5 text-xs text-destructive">
+          <AlertTriangle className="h-3.5 w-3.5" /> {error}
+        </p>
+      ) : null}
+      {sites?.length === 0 ? <p className="text-xs text-muted-foreground">This WordPress.com account has no sites yet.</p> : null}
+      {sites?.map((site) => (
+        <div key={site.id} className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2">
+          <div>
+            <p className="text-sm font-medium">{site.name}</p>
+            <p className="text-xs text-muted-foreground">{site.url}</p>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => select(site)} loading={selecting === site.id} disabled={selecting !== null}>
+            Use this site
+          </Button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+interface SpreadsheetFile {
+  id: string;
+  name: string;
+  modifiedTime?: string;
+}
+
+function GoogleSheetsTool() {
+  const [spreadsheets, setSpreadsheets] = React.useState<SpreadsheetFile[] | null>(null);
+  const [loadingList, setLoadingList] = React.useState(false);
+  const [listError, setListError] = React.useState<string | null>(null);
+  const [spreadsheetId, setSpreadsheetId] = React.useState("");
+  const [range, setRange] = React.useState("A1:Z20");
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [values, setValues] = React.useState<string[][] | null>(null);
+
+  // EXPLICIT READ-SELECTION FIX (2026-09-13): a real, live-confirmed defect -- this selector used to
+  // unconditionally auto-select spreadsheets[0] the instant the Drive list loaded (whichever spreadsheet
+  // was most recently modified, per listSpreadsheets()'s own orderBy), with no "not yet selected" state
+  // and no persisted-selection restore on mount. That made ADASOS silently pick a spreadsheet for the
+  // user instead of the user explicitly choosing one, and a page refresh reset the choice every time.
+  // Fetches the real, previously-persisted selection from the server on mount, and only trusts it once
+  // it's confirmed to still be present in a fresh listSpreadsheets() result (selectionUnavailable below)
+  // -- never silently falling back to a different spreadsheet when it isn't.
+  const [persistedSelection, setPersistedSelection] = React.useState<{ id: string; name: string } | null>(null);
+  const [loadingSelection, setLoadingSelection] = React.useState(false);
+  const [selectionUnavailable, setSelectionUnavailable] = React.useState(false);
+
+  async function loadSpreadsheets() {
+    setLoadingList(true);
+    setListError(null);
+    try {
+      const res = await fetch("/api/integrations/google-sheets/spreadsheets");
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Could not list spreadsheets.");
+      setSpreadsheets(body.spreadsheets);
+    } catch (err) {
+      setListError(err instanceof Error ? err.message : "Could not list spreadsheets.");
+    } finally {
+      setLoadingList(false);
+    }
+  }
+
+  React.useEffect(() => {
+    loadSpreadsheets();
+  }, []);
+
+  React.useEffect(() => {
+    (async () => {
+      setLoadingSelection(true);
+      try {
+        const res = await fetch("/api/integrations/google-sheets/values");
+        const body = await res.json();
+        if (res.ok && body.selected) setPersistedSelection(body.selected);
+      } catch {
+        // Non-fatal -- the read selector below still lets the user choose explicitly.
+      } finally {
+        setLoadingSelection(false);
+      }
+    })();
+  }, []);
+
+  // Reconciles the persisted selection against a REAL, fresh spreadsheet list -- only once both have
+  // loaded. Never trusts the persisted id blindly: if it's genuinely still in the user's Drive, that's
+  // the explicit selection to restore; if it's gone (deleted, unshared, access revoked), this surfaces a
+  // clear "reselect" state instead of silently defaulting to spreadsheets[0] or any other spreadsheet.
+  React.useEffect(() => {
+    if (!spreadsheets || loadingSelection) return;
+    if (!persistedSelection) return;
+    const stillAvailable = spreadsheets.some((s) => s.id === persistedSelection.id);
+    if (stillAvailable) {
+      setSpreadsheetId(persistedSelection.id);
+      setSelectionUnavailable(false);
+    } else {
+      setSelectionUnavailable(true);
+    }
+  }, [spreadsheets, persistedSelection, loadingSelection]);
+
+  async function readValues(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const parsed = googleSheetsValuesSchema.safeParse({ spreadsheetId, range });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? "Enter a spreadsheet and range.");
+      return;
+    }
+    setLoading(true);
+    setValues(null);
+    try {
+      const res = await fetch("/api/integrations/google-sheets/values", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed.data),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Could not read this range.");
+      setValues(body.values.values);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not read this range.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 border-t border-border pt-4">
+      <div>
+        <p className="text-sm font-medium">Read a spreadsheet</p>
+        <p className="text-xs text-muted-foreground">Pull real cell values from one of your Google Sheets.</p>
+      </div>
+      {listError ? (
+        <p className="flex items-center gap-1.5 text-xs text-destructive">
+          <AlertTriangle className="h-3.5 w-3.5" /> {listError}
+        </p>
+      ) : null}
+      {selectionUnavailable ? (
+        <p className="flex items-center gap-1.5 text-xs text-destructive">
+          <AlertTriangle className="h-3.5 w-3.5" /> Your previously selected spreadsheet
+          {persistedSelection?.name ? ` ("${persistedSelection.name}")` : ""} is no longer accessible in your connected Google
+          account -- choose a spreadsheet below.
+        </p>
+      ) : null}
+      <form onSubmit={readValues} className="space-y-2">
+        <select
+          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
+          value={spreadsheetId}
+          onChange={(e) => setSpreadsheetId(e.target.value)}
+          disabled={loadingList || !spreadsheets?.length}
+          aria-label="Spreadsheet"
+        >
+          {!spreadsheets?.length ? <option value="">{loadingList ? "Loading spreadsheets…" : "No spreadsheets found"}</option> : null}
+          <option value="">Choose a spreadsheet…</option>
+          {spreadsheets?.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+        <div className="flex items-center gap-2">
+          <Input value={range} onChange={(e) => setRange(e.target.value)} placeholder="Sheet1!A1:D10" aria-label="Range" />
+          <Button type="submit" size="sm" loading={loading} disabled={loading || !spreadsheetId}>
+            <Search className="h-3.5 w-3.5" /> Read
+          </Button>
+        </div>
+      </form>
+      {error ? (
+        <p className="flex items-center gap-1.5 text-xs text-destructive">
+          <AlertTriangle className="h-3.5 w-3.5" /> {error}
+        </p>
+      ) : null}
+      {values ? (
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className="w-full text-xs">
+            <tbody>
+              {values.length === 0 ? (
+                <tr>
+                  <td className="px-3 py-2 text-muted-foreground">This range is empty.</td>
+                </tr>
+              ) : (
+                values.map((row, i) => (
+                  <tr key={i} className="border-b border-border last:border-0">
+                    {row.map((cell, j) => (
+                      <td key={j} className="whitespace-nowrap px-3 py-1.5">
+                        {cell}
+                      </td>
+                    ))}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

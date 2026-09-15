@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 /**
@@ -46,4 +47,43 @@ export async function writeJsonFileAtomic(filePath: string, value: unknown): Pro
 
 function isNodeErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+/**
+ * Synchronous counterpart to {@link readJsonFile}, for the narrow set of
+ * callers that cannot become async without a breaking, wide-blast-radius
+ * signature change to a hot, synchronous path they sit behind (see
+ * ../../boss-agent/routing/routing-rejection-tracker.ts, which durably
+ * persists routing-rejection state from inside TaskRouter.route() --
+ * deliberately kept synchronous since it's called from dozens of existing
+ * call sites, in and out of this repo, that all expect a synchronous
+ * RoutingDecision back). Same "undefined means no file yet, a parse error
+ * still throws" contract as the async version.
+ */
+export function readJsonFileSync<T>(filePath: string): T | undefined {
+  try {
+    const raw = readFileSync(filePath, "utf8");
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    if (isNodeErrnoException(error) && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+/** Synchronous counterpart to {@link writeJsonFileAtomic} -- same temp-file-then-rename atomicity guarantee, same "creates missing parent directories" behavior, for the same narrow synchronous-caller reason documented on {@link readJsonFileSync}. */
+export function writeJsonFileAtomicSync(filePath: string, value: unknown): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${randomUUID()}.tmp`;
+  const serialized = JSON.stringify(value, null, 2);
+  writeFileSync(tempPath, serialized, "utf8");
+  try {
+    renameSync(tempPath, filePath);
+  } catch (error) {
+    if (existsSync(tempPath)) {
+      unlinkSync(tempPath);
+    }
+    throw error;
+  }
 }

@@ -3,13 +3,17 @@ import { SettingsShell } from "@/components/settings/settings-shell";
 import { getServerAuthSession } from "@/server/auth";
 import { db } from "@/server/db";
 import { getConnectionStatus } from "@/server/google-search-console";
+import { getConnectionStatus as getGoogleSheetsConnectionStatus } from "@/server/google-sheets";
+import { getConnectionStatus as getGmailConnectionStatus } from "@/server/gmail";
+import { getConnectionStatus as getPixabayConnectionStatus } from "@/server/pixabay";
+import { getConnectionStatus as getWordPressConnectionStatus } from "@/server/wordpress";
 import { redirect } from "next/navigation";
 
 export default async function SettingsPage() {
   const session = await getServerAuthSession();
   if (!session) redirect("/login");
 
-  const [user, apiKeys, googleSearchConsole] = await Promise.all([
+  const [user, apiKeys, googleSearchConsole, googleSheets, gmail, pixabay, wordpress] = await Promise.all([
     db.user.findUnique({
       where: { id: session.user.id },
       select: {
@@ -29,6 +33,10 @@ export default async function SettingsPage() {
       select: { id: true, label: true, keyPrefix: true, createdAt: true, lastUsedAt: true },
     }),
     getConnectionStatus(session.user.id),
+    getGoogleSheetsConnectionStatus(session.user.id),
+    getGmailConnectionStatus(session.user.id),
+    getPixabayConnectionStatus(),
+    getWordPressConnectionStatus(session.user.id),
   ]);
 
   if (!user) redirect("/login");
@@ -45,6 +53,10 @@ export default async function SettingsPage() {
             lastUsedAt: k.lastUsedAt ? k.lastUsedAt.toISOString() : null,
           }))}
           initialGoogleSearchConsole={googleSearchConsole}
+          initialGoogleSheets={googleSheets}
+          initialGmail={gmail}
+          initialPixabay={pixabay}
+          initialWordPress={wordpress}
         />
       </div>
     </>

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createWebApprovalChannel } from "./approval";
-import type { OnPageSeoResult, TechnicalSeoResult, WebsiteAuditResult } from "./types";
+import type { AuditFinding, OnPageSeoResult, TechnicalSeoResult, WebsiteAuditResult } from "./types";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const backendDist = path.resolve(here, "../../../../dist/src");
@@ -12,7 +12,7 @@ async function importBackend(relativeToSrc: string) {
   return import(/* webpackIgnore: true */ `file://${path.join(backendDist, relativeToSrc)}`);
 }
 
-let agentsPromise: Promise<{ siteAuditOrchestrator: any; onPageAgent: any; techSeoAgent: any; crawlWebsite: any }> | null = null;
+let agentsPromise: Promise<{ siteAuditOrchestrator: any; onPageAgent: any; techSeoAgent: any; crawlWebsite: any; dedupeDirectoryIndexVariants: any }> | null = null;
 
 async function getAgents() {
   if (!agentsPromise) {
@@ -25,6 +25,7 @@ async function getAgents() {
         { TechnicalSeoAgent },
         { loadTechnicalSeoAgentConfig },
         { crawlWebsite },
+        { dedupeDirectoryIndexVariants },
       ] = await Promise.all([
         importBackend("agents/website-audit-agent/site-audit-orchestrator.js"),
         importBackend("agents/website-audit-agent/config/website-audit-agent.config.js"),
@@ -33,6 +34,7 @@ async function getAgents() {
         importBackend("agents/technical-seo-agent/technical-seo-agent.js"),
         importBackend("agents/technical-seo-agent/config/technical-seo-agent.config.js"),
         importBackend("core/crawling/website-crawler.js"),
+        importBackend("core/crawling/dedupe-directory-index-variants.js"),
       ]);
 
       // SiteAuditOrchestrator supersedes the frozen single-page WebsiteAuditAgent
@@ -52,7 +54,7 @@ async function getAgents() {
         loadTechnicalSeoAgentConfig({ auditLogPath: path.join(backendRoot, "var", "web", "technical-seo-agent", "audit-log.jsonl") }, backendRoot),
         createWebApprovalChannel(),
       );
-      return { siteAuditOrchestrator, onPageAgent, techSeoAgent, crawlWebsite };
+      return { siteAuditOrchestrator, onPageAgent, techSeoAgent, crawlWebsite, dedupeDirectoryIndexVariants };
     })();
   }
   return agentsPromise;
@@ -99,6 +101,23 @@ export interface CrawledPageSummary {
   readonly outcome?: string;
   readonly contentType?: string | null;
   readonly durationMs?: number | null;
+  /**
+   * ON-PAGE SEO EVIDENCE FIX (2026-09-10): this page's OWN real, already-
+   * computed audit findings (title/meta length, heading structure, image
+   * alt text, page-level internal links, schema/structured-data validity,
+   * canonical, Open Graph, Twitter Card, mobile-friendliness,
+   * accessibility -- every AuditChecker in
+   * src/agents/website-audit-agent/checks/ that SiteAuditOrchestrator
+   * already runs against EVERY crawled page, not just the start URL).
+   * Previously computed by SiteAuditOrchestrator.auditCrawl() (see each
+   * PageAuditEntry.audit) and then silently discarded when this array was
+   * built -- only the start URL's own findings ever survived, merged into
+   * the top-level websiteAudit.findings. `undefined` for a page whose audit
+   * never ran (crawl-only failure); `[]` is a real, checked-and-clean
+   * result, not "not checked". See buildOnPageSeoEvidenceContext() below,
+   * the only consumer of this field.
+   */
+  readonly findings?: readonly AuditFinding[];
 }
 
 export interface CrawlSummary {
@@ -110,6 +129,8 @@ export interface CrawlSummary {
   readonly robotsTxtFound: boolean;
   readonly sitemapChecked: boolean;
   readonly sitemapUrlsFound: number;
+  /** SITEMAP REMEDIATION CAPABILITY (2026-08-22): the real, successfully-fetched page URLs from THIS SAME crawl -- the ONLY real source sitemap-remediation-planner.ts is allowed to draw sitemap entries from. Never includes a page that failed to fetch/was blocked. */
+  readonly crawledUrls: readonly string[];
   readonly limitations: readonly string[];
   readonly decidedAt: string;
 }
@@ -129,7 +150,220 @@ export interface FullAuditResult {
   readonly lighthouse: LighthouseSummary;
 }
 
-const MAX_CRAWL_PAGES = 15;
+/**
+ * Builds a reply straight from real FullAuditResult fields -- no LLM, no
+ * fabrication, every number traceable to the pipeline that produced it.
+ *
+ * EVIDENCE HANDOFF FIX (2026-08-18): moved here (was a private function
+ * inlined in api/workspace/messages/route.ts) and exported, mirroring
+ * server/backend/remediation.ts's own buildRemediationApprovalCardMeta()
+ * precedent -- an inlined, private route.ts function is never independently
+ * testable, and this same formatting is now needed in two places: the
+ * top-level chat reply (route.ts's own audit branch, unchanged), and as the
+ * real-evidence grounding block passed into the content pipeline once the
+ * Phase 5 workflow continues past remediation (see buildAuditFindingsContext()
+ * below) -- reusing one real function rather than duplicating its logic.
+ *
+ * ACCESS-EVIDENCE FIX (2026-09-11): `sourceLabel` is an optional, additive,
+ * backward-compatible override for the opening sentence only -- every
+ * existing caller that omits it keeps the exact original "Ran a live
+ * technical SEO audit..." wording, unchanged. Exists because a caller can
+ * now legitimately pass a REUSED, previously-persisted `result` instead of
+ * one just produced by a fresh crawl (see route.ts's own auditUrl branch) --
+ * "Ran a live... audit" would be a real, false claim in that case ("nothing
+ * below is estimated" implies freshness this data does not have). Never
+ * changes any other line: every finding/score/count below is still the
+ * same real, already-computed data either way.
+ */
+export function summarizeAuditForChat(url: string, result: FullAuditResult, sourceLabel?: string): string {
+  const { websiteAudit, crawl, lighthouse } = result;
+  const lines: string[] = [
+    sourceLabel ?? `Ran a live technical SEO audit on ${url} using ADASOS's production audit pipeline (real crawl + Lighthouse -- nothing below is estimated).`,
+    "",
+    `**Crawl**: ${crawl.pagesCrawled} page(s) crawled. robots.txt: ${crawl.robotsTxtFound ? "found" : "checked, not found (404)"}. sitemap.xml: ${crawl.sitemapUrlsFound} URL(s) discovered (checked).`,
+    `**HTTP headers**: real response headers inspected across every crawled page (security-header findings included below if any).`,
+    lighthouse.available
+      ? `**Lighthouse**: Performance ${lighthouse.categoryScores?.performance ?? "—"}, Accessibility ${lighthouse.categoryScores?.accessibility ?? "—"}, Best Practices ${lighthouse.categoryScores?.bestPractices ?? "—"}, SEO ${lighthouse.categoryScores?.seo ?? "—"}. Core Web Vitals -- LCP ${lighthouse.coreWebVitals?.lcpMs != null ? `${Math.round(lighthouse.coreWebVitals.lcpMs)}ms` : "—"}, CLS ${lighthouse.coreWebVitals?.cls ?? "—"}.`
+      : `**Lighthouse**: Not Verifiable (the real Lighthouse run did not return a result for this URL).`,
+    `**Findings**: ${websiteAudit.summary.criticalCount} critical, ${websiteAudit.summary.warningCount} warning, ${websiteAudit.summary.infoCount} info.`,
+  ];
+
+  const notable = websiteAudit.findings.filter((f) => f.severity !== "info").slice(0, 6);
+  if (notable.length > 0) {
+    lines.push("", "Top issues:");
+    for (const f of notable) {
+      lines.push(`- [${f.severity}] (${f.category}) ${f.message}`);
+    }
+  }
+
+  lines.push("", "Full evidence (every crawled page, all findings, real headers) is saved -- open SEO Audit for the complete report, or ask me about any specific finding.");
+  return lines.join("\n");
+}
+
+/**
+ * EVIDENCE HANDOFF FIX (2026-08-18): the real, non-fabricated grounding
+ * block the Phase 5 orchestrated workflow's continuation into Strategy/
+ * Keyword Research/Content/On-Page SEO appends to its own userMessage --
+ * mirrors this codebase's established build*Context() convention
+ * (buildSearchConsoleContext, buildGovernanceEvidenceContext,
+ * buildCampaignTrackingContext, buildGoogleSheetsContext): a bracketed,
+ * explicitly-labeled real-evidence block with an instruction never to
+ * invent beyond it. Reuses summarizeAuditForChat()'s own real, deterministic
+ * text -- the exact same findings already shown to the user for the audit
+ * stage -- rather than re-deriving or duplicating that formatting.
+ */
+export function buildAuditFindingsContext(url: string, result: FullAuditResult): string {
+  return (
+    `[REAL, VERIFIED WEBSITE AUDIT EVIDENCE for ${url} -- produced by ADASOS's real audit pipeline earlier in this ` +
+    `workflow. Use this directly for keyword research, strategy, content, and on-page recommendations; never invent ` +
+    `additional findings beyond what's listed here:\n${summarizeAuditForChat(url, result)}]`
+  );
+}
+
+/**
+ * ON-PAGE SEO EVIDENCE FIX (2026-09-10): a real, live-observed gap --
+ * buildAuditFindingsContext() above deliberately summarizes for a chat
+ * reply (top 6 non-"info" site-wide issues only, per summarizeAuditForChat()),
+ * which is the wrong shape for a genuine on-page SEO audit: page-level
+ * checks like MetadataChecker/HeadingStructureChecker only ever emit a
+ * finding when something is WRONG (a compliant title/meta/heading
+ * structure produces zero findings for that category, by design -- see
+ * each checker's own header), so "info-only, capped at 6, site-wide" would
+ * silently omit most or all of the real per-page evidence an On-Page SEO
+ * Agent needs (title/meta, H1-H6, image alt, page-level internal links,
+ * schema/structured-data, canonical, Open Graph, Twitter Card,
+ * mobile-friendliness, accessibility).
+ *
+ * This surfaces EVERY real finding (all severities -- never just
+ * warning/critical) for ONE specific page, grouped by the exact category
+ * strings the real checkers in src/agents/website-audit-agent/checks/
+ * already use.
+ *
+ * FOUR-STATE EVIDENCE FIX (2026-09-10): "no findings recorded" used to be
+ * reported identically whether a category's checker ran and found nothing
+ * wrong, or the page was never checked at all -- a real ambiguity the
+ * previous version explicitly refused to resolve ("does NOT necessarily
+ * mean..."). This is now resolved with real, structural grounding, not a
+ * guess: SiteAuditOrchestrator.auditCrawl() (see its own source) runs
+ * EVERY page-level checker together, in one atomic per-page audit call --
+ * a page's `audit` is either a complete WebsiteAuditResult (every checker
+ * ran) or `null` (the audit never completed for that page at all; see
+ * PageAuditEntry.audit). So CrawledPageSummary.findings being `undefined`
+ * means the audit never ran for that page (state: NOT CHECKED, checked at
+ * the whole-page level below); being defined but empty for one category
+ * means that category's checker DID run as part of the same atomic audit
+ * and found nothing to flag (state: VERIFIED -- NO ISSUE FOUND); one or
+ * more real findings is the fourth state (state: FINDING). The true fifth
+ * state -- a data point ADASOS has no checker for at all -- is UNAVAILABLE,
+ * reserved for keyword/content placement below (never a per-category
+ * state, since every listed category DOES have a real checker).
+ *
+ * KEYWORD/CONTENT PLACEMENT (2026-09-10): confirmed, at the source, that no
+ * existing ADASOS capability verifies actual keyword placement in a page's
+ * real content -- src/agents/on-page-seo-agent/recommendations/
+ * keyword-usage-recommender.ts's own header already documents this
+ * explicitly ("This agent does not have the page's actual body text... it
+ * recommends where it *should* go rather than claiming to confirm where it
+ * currently is or isn't"), and no AuditChecker in checks/ computes it
+ * either. SavedKeyword (prisma schema) is unrelated -- workspace-level
+ * keyword research with no URL/page association, not page-content
+ * placement data; attaching it here would misrepresent an unrelated
+ * dataset as page-specific evidence, which is exactly the fabrication this
+ * fix must not do. `keywordEvidence` is the smallest production-safe
+ * integration point for this: an optional, explicitly-labeled parameter a
+ * FUTURE real, page-scoped, persisted keyword/content-placement capability
+ * can supply real evidence through, once one exists -- no caller passes it
+ * today (confirmed: zero call sites), so the honest "UNAVAILABLE" message
+ * is what every current caller actually sees.
+ *
+ * Falls back to `result.websiteAudit` (the already-known-good start-page
+ * audit, always present) when `url` doesn't match a specific crawled page
+ * entry -- e.g. a bare/normalized URL, or a page whose own crawl attempt
+ * never completed -- always labeled with which page's evidence is
+ * actually being shown, never silently substituted.
+ */
+const ON_PAGE_EVIDENCE_CATEGORIES: readonly { readonly category: string; readonly label: string }[] = [
+  { category: "metadata", label: "Title tag / meta description" },
+  { category: "headings", label: "H1-H6 heading structure" },
+  { category: "image-alt", label: "Image ALT text" },
+  { category: "internal-links", label: "Page-level internal linking" },
+  { category: "schema-type-validation", label: "Schema.org type validity" },
+  { category: "structured-data-validation", label: "Structured data (JSON-LD) validity" },
+  { category: "canonical", label: "Canonical tag" },
+  { category: "open-graph", label: "Open Graph tags" },
+  { category: "twitter-card", label: "Twitter Card tags" },
+  { category: "mobile-friendliness", label: "Mobile-friendliness (viewport)" },
+  { category: "accessibility", label: "Accessibility" },
+];
+
+/**
+ * `keywordEvidence`: the smallest production-safe integration point for a
+ * FUTURE real, page-scoped keyword/content-placement capability -- see this
+ * function's own header. `undefined`/`null`/empty (every current caller)
+ * means no such capability has supplied real evidence yet, so the
+ * UNAVAILABLE line is shown; a non-empty string is included verbatim,
+ * clearly labeled, never merged into or mistaken for a checker finding.
+ */
+export function buildOnPageSeoEvidenceContext(url: string, result: FullAuditResult, keywordEvidence?: string | null): string {
+  const matchedPage = result.crawl.pages.find((p) => p.url === url);
+  const findings = matchedPage?.findings ?? (result.websiteAudit.url === url || (!matchedPage && result.crawl.startUrl === url) ? result.websiteAudit.findings : undefined);
+  const evidencePageUrl = matchedPage ? matchedPage.url : result.websiteAudit.url ?? result.crawl.startUrl;
+
+  if (findings === undefined) {
+    return (
+      `[ON-PAGE SEO EVIDENCE for ${url}]\n` +
+      `STATE: NOT CHECKED -- no saved per-page audit evidence was found for this exact URL in this workspace's ` +
+      `most recent audit of ${result.crawl.startUrl} (crawled pages: ${result.crawl.pages.map((p) => p.url).join(", ") || "none"}). ` +
+      `Do not invent title, meta description, heading, alt-text, internal-link, or schema findings for this page -- ` +
+      `report that no saved on-page evidence exists for it and recommend running a fresh audit.]`
+    );
+  }
+
+  const lines: string[] = [
+    `[ON-PAGE SEO EVIDENCE for ${evidencePageUrl}${evidencePageUrl !== url ? ` (closest available saved page-level audit -- no exact saved entry for ${url})` : ""} -- ` +
+      "produced by ADASOS's real audit pipeline. Each category below is labeled with its real state -- FINDING (a " +
+      "real, specific issue/observation), VERIFIED / NO ISSUE FOUND (the checker ran and found nothing to flag -- " +
+      "this IS a confirmed pass, not an absence of data), or UNAVAILABLE (no ADASOS capability computes this at " +
+      "all). Never invent a title, meta description, heading, alt text, internal link, or schema fact beyond what " +
+      "is listed here, and never present UNAVAILABLE or NOT CHECKED as if it were a confirmed pass.]",
+  ];
+
+  for (const { category, label } of ON_PAGE_EVIDENCE_CATEGORIES) {
+    const categoryFindings = findings.filter((f) => f.category === category);
+    lines.push("", `${label} (category: ${category}):`);
+    if (categoryFindings.length === 0) {
+      lines.push("  STATE: VERIFIED / NO ISSUE FOUND -- this category's checker ran as part of this page's real audit and recorded no finding.");
+    } else {
+      for (const f of categoryFindings) {
+        lines.push(`  STATE: FINDING -- [${f.severity}] ${f.message} (Recommendation: ${f.recommendation})`);
+      }
+    }
+  }
+
+  lines.push(
+    "",
+    "Keyword/content placement analysis:",
+    keywordEvidence && keywordEvidence.trim() !== ""
+      ? `  STATE: FINDING -- ${keywordEvidence.trim()}`
+      : "  STATE: UNAVAILABLE -- no existing ADASOS capability verifies actual keyword placement in this page's real content; do not fabricate it.",
+  );
+
+  return lines.join("\n");
+}
+
+// CRAWL BUDGET FIX (2026-09-10): 15 was an arbitrary, undocumented override
+// of the crawler's own built-in default (website-crawler.ts's
+// DEFAULT_MAX_PAGES = 50) -- real evidence it was too small: a genuinely
+// small ~14-page portfolio site with a modest 6-post blog and a real,
+// correctly-discovered sitemap.xml (18 URLs total: the site's other pages,
+// discovered via links, are already ~12 of that budget) needs more than 15
+// pages to actually reach the sitemap-seeded, otherwise-unlinked articles
+// queued near the end of a real sitemap's URL list -- the crawler's own
+// FIFO/BFS order means a too-small budget silently truncates exactly the
+// pages sitemap discovery exists to find. Aligning with the crawler's own
+// already-established default removes an arbitrary, demonstrably
+// insufficient number rather than inventing a new one.
+const MAX_CRAWL_PAGES = 50;
 
 export interface RawCrawledPage {
   readonly url: string;
@@ -141,6 +375,8 @@ export interface RawCrawledPage {
   readonly outcome?: string;
   readonly durationMs?: number | null;
   readonly redirectChain?: readonly string[];
+  /** The real, fetched HTML body, or `null` if this page was never successfully fetched. Used only to detect a directory/index.html URL pair that serves byte-identical content -- see dedupeDirectoryIndexVariants(). */
+  readonly html?: string | null;
 }
 
 /**
@@ -210,7 +446,7 @@ function logAuditDiagnostics(requestedUrl: string, crawlResult: { pages: readonl
  * web/src/app/api/seo-audit/route.ts.
  */
 export async function runFullAudit(url: string, targetKeyword: string): Promise<FullAuditResult> {
-  const { siteAuditOrchestrator, onPageAgent, techSeoAgent, crawlWebsite } = await getAgents();
+  const { siteAuditOrchestrator, onPageAgent, techSeoAgent, crawlWebsite, dedupeDirectoryIndexVariants } = await getAgents();
 
   // Crawl once, directly, so the real robots.txt/sitemap.xml evidence
   // (WebsiteCrawlResult.robotsTxtContent / .sitemapUrls) is available for
@@ -273,9 +509,20 @@ export async function runFullAudit(url: string, targetKeyword: string): Promise<
     runId: siteResult.requestId,
     startUrl: siteResult.startUrl,
     pagesCrawled: siteResult.pagesCrawled,
-    pages: siteResult.pageAudits.map((p: { url: string; status: number | null; error: string | null }) => {
+    // ON-PAGE SEO EVIDENCE FIX (2026-09-10): `p.audit` (PageAuditEntry's own
+    // real, already-computed WebsiteAuditResult for THIS page -- title/meta,
+    // headings, image alt, page-level internal links, schema, canonical,
+    // Open Graph, Twitter Card, mobile-friendliness, accessibility) used to
+    // be dropped here -- the type annotation below explicitly narrowed `p`
+    // to {url, status, error}, discarding the sibling `audit` field
+    // SiteAuditOrchestrator.auditCrawl() already populates for every
+    // crawled page, not just the start URL. Retaining it (as
+    // p.audit?.findings) is the ONLY change: no new checker, no new crawl,
+    // no new computation -- this data was always real and already
+    // computed, just never persisted past this one line.
+    pages: siteResult.pageAudits.map((p: { url: string; status: number | null; error: string | null; audit: { findings: readonly AuditFinding[] } | null }) => {
       const raw = rawPagesByUrl.get(p.url);
-      return { url: p.url, status: p.status, error: p.error, outcome: raw?.outcome, contentType: raw?.contentType, durationMs: raw?.durationMs };
+      return { url: p.url, status: p.status, error: p.error, outcome: raw?.outcome, contentType: raw?.contentType, durationMs: raw?.durationMs, findings: p.audit?.findings };
     }),
     // robots.txt and sitemap.xml are always attempted by crawlWebsite() --
     // "found" reflects whether the real request actually returned content,
@@ -284,6 +531,25 @@ export async function runFullAudit(url: string, targetKeyword: string): Promise<
     robotsTxtFound: crawlResult.robotsTxtContent !== null,
     sitemapChecked: true,
     sitemapUrlsFound: crawlResult.sitemapUrls.length,
+    // SITEMAP REMEDIATION CAPABILITY (2026-08-22): only genuinely,
+    // successfully-fetched pages (outcome === "success") -- never a page
+    // that was blocked, errored, or never reached.
+    //
+    // DUPLICATE-VARIANT FIX (2026-09-10): a real crawl commonly discovers
+    // BOTH "https://site/about/" and "https://site/about/index.html" as two
+    // separate, genuinely successful fetches (a directory URL resolves to
+    // its own index.html by web-server convention) -- listing both in a
+    // generated sitemap would propose two URLs for what is actually one
+    // page. dedupeDirectoryIndexVariants() drops the index.html entry only
+    // when its directory sibling was ALSO crawled with byte-identical HTML
+    // (real, observed content -- never guessed from the URL shape alone),
+    // keeping the directory-style URL. See
+    // src/core/crawling/dedupe-directory-index-variants.ts's own header.
+    crawledUrls: dedupeDirectoryIndexVariants(
+      (crawlResult.pages as RawCrawledPage[])
+        .filter((p) => p.outcome === "success")
+        .map((p) => ({ url: p.finalUrl ?? p.url, html: p.html ?? null })),
+    ),
     limitations: siteResult.limitations,
     decidedAt: siteResult.decidedAt,
   };

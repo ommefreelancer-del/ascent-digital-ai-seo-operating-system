@@ -183,4 +183,184 @@ describe("crawlWebsite", () => {
     const result = await crawlWebsite("http://public.example.com/", { maxPages: 1 });
     expect(result.limitations.some((l) => l.includes("client-side JavaScript"))).toBe(true);
   });
+
+  // REGRESSION (QA-002): every crawled page must carry a verified outcome,
+  // content-type, and real fetch duration -- not just url/status/error --
+  // so a failure can be reported with real diagnostics instead of a generic
+  // message.
+  it("records outcome, content-type, and duration for a successfully-crawled page", async () => {
+    installFetchMock();
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    const result = await crawlWebsite("http://public.example.com/", { maxPages: 1 });
+    const start = result.pages.find((p) => p.url === "http://public.example.com/");
+    expect(start?.outcome).toBe("success");
+    expect(start?.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("records the real HTTP error category and status for a page that 404s, including the response headers", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        if (url.toString() === "http://public.example.com/robots.txt") return new Response("not found", { status: 404 });
+        if (url.toString() === "http://public.example.com/sitemap.xml") return new Response("not found", { status: 404 });
+        return new Response("<html><body>404</body></html>", { status: 404, headers: { "content-type": "text/html; charset=utf-8" } });
+      }),
+    );
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    const result = await crawlWebsite("http://public.example.com/");
+    const start = result.pages.find((p) => p.url === "http://public.example.com/");
+    expect(start?.status).toBe(404);
+    expect(start?.outcome).toBe("http_error");
+    expect(start?.contentType).toBe("text/html; charset=utf-8");
+    expect(start?.error).toMatch(/HTTP 404/);
+  });
+
+  it("records outcome 'invalid_html' for a 200 response whose body is not real HTML, without treating it as successfully crawled", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        if (url.toString() === "http://public.example.com/robots.txt") return new Response("not found", { status: 404 });
+        if (url.toString() === "http://public.example.com/sitemap.xml") return new Response("not found", { status: 404 });
+        return new Response(JSON.stringify({ hello: "world" }), { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    const result = await crawlWebsite("http://public.example.com/");
+    const start = result.pages.find((p) => p.url === "http://public.example.com/");
+    expect(start?.outcome).toBe("invalid_html");
+    expect(start?.contentType).toBe("application/json");
+    expect(start?.error).toMatch(/Invalid HTML/i);
+  });
+
+  it("records outcome 'robots_blocked' (not a generic error) for a page disallowed by robots.txt", async () => {
+    installFetchMock();
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    const result = await crawlWebsite("http://public.example.com/");
+    const blocked = result.pages.find((p) => p.url === "http://public.example.com/private/secret");
+    expect(blocked?.outcome).toBe("robots_blocked");
+  });
+});
+
+// REGRESSION (2026-09-10): the exact real production incident --
+// https://ommefreelancer-del.github.io/portfolio-website/ (a GitHub-Pages
+// "project site", hosted under a repo-name path, not at the account root).
+// The site's own real, published sitemap.xml at
+// https://user.github.io/repo/sitemap.xml correctly lists 6 blog article
+// pages that are otherwise genuine ORPHANS: linked from nowhere else on the
+// site (confirmed against the real live site -- the blog index page's own
+// nav/footer never links to a single article), so sitemap discovery is the
+// ONLY way the crawler can ever find them. The bug: robots.txt and the
+// sitemap.xml fallback were resolved against the bare account-level origin
+// (https://user.github.io/robots.txt) instead of the project's own base
+// (https://user.github.io/repo/robots.txt) -- landing on completely
+// different, unrelated, real GitHub-account-root infrastructure that has no
+// Sitemap: line at all, silently discarding the site's real sitemap and its
+// 6 real blog articles with it. This fixture reproduces exactly that split:
+// the account-root robots.txt/sitemap.xml genuinely exist and genuinely
+// differ from the project's own.
+const PROJECT_SITE_PAGES: Record<string, { status: number; body: string }> = {
+  // The WRONG, account-root robots.txt a buggy bare-origin fetch would find
+  // -- real, reachable, genuinely different content, no Sitemap: line.
+  "https://user.github.io/robots.txt": { status: 200, body: "User-agent: *\nAllow: /" },
+  // The REAL, correct, project-site robots.txt -- has the real Sitemap: line.
+  "https://user.github.io/repo/robots.txt": {
+    status: 200,
+    body: "User-agent: *\nAllow: /\n\nSitemap: https://user.github.io/repo/sitemap.xml",
+  },
+  // The REAL, correct, project-site sitemap.xml -- lists the homepage, the
+  // blog index, and the 6 orphan blog articles nothing else links to.
+  "https://user.github.io/repo/sitemap.xml": {
+    status: 200,
+    body:
+      `<urlset><url><loc>https://user.github.io/repo/</loc></url>` +
+      `<url><loc>https://user.github.io/repo/blog/</loc></url>` +
+      `<url><loc>https://user.github.io/repo/blog/post-1.html</loc></url>` +
+      `<url><loc>https://user.github.io/repo/blog/post-2.html</loc></url>` +
+      `<url><loc>https://user.github.io/repo/blog/post-3.html</loc></url>` +
+      `<url><loc>https://user.github.io/repo/blog/post-4.html</loc></url>` +
+      `<url><loc>https://user.github.io/repo/blog/post-5.html</loc></url>` +
+      `<url><loc>https://user.github.io/repo/blog/post-6.html</loc></url></urlset>`,
+  },
+  "https://user.github.io/repo/": {
+    status: 200,
+    // Deliberately links ONLY to the blog index, never to a single article
+    // -- mirrors the real site's own actual, confirmed HTML exactly.
+    body: `<html><body><a href="blog/">Blog</a></body></html>`,
+  },
+  "https://user.github.io/repo/blog/": {
+    status: 200,
+    // The real site's own confirmed behavior: the blog index's nav/footer
+    // links back to other site sections and to itself, but never to any of
+    // its own article pages.
+    body: `<html><body><a href="../">Home</a></body></html>`,
+  },
+  "https://user.github.io/repo/blog/post-1.html": { status: 200, body: "<html><body>Post 1</body></html>" },
+  "https://user.github.io/repo/blog/post-2.html": { status: 200, body: "<html><body>Post 2</body></html>" },
+  "https://user.github.io/repo/blog/post-3.html": { status: 200, body: "<html><body>Post 3</body></html>" },
+  "https://user.github.io/repo/blog/post-4.html": { status: 200, body: "<html><body>Post 4</body></html>" },
+  "https://user.github.io/repo/blog/post-5.html": { status: 200, body: "<html><body>Post 5</body></html>" },
+  "https://user.github.io/repo/blog/post-6.html": { status: 200, body: "<html><body>Post 6</body></html>" },
+};
+
+function installProjectSiteFetchMock() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string | URL) => {
+      const page = PROJECT_SITE_PAGES[url.toString()];
+      if (!page) return new Response("not found", { status: 404 });
+      return new Response(page.body, { status: page.status });
+    }),
+  );
+}
+
+describe("crawlWebsite -- GitHub-Pages-style project site (non-root path)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("fetches robots.txt relative to the site's own start URL, not the bare account-level origin", async () => {
+    installProjectSiteFetchMock();
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    const result = await crawlWebsite("https://user.github.io/repo/");
+
+    // The real, project-site robots.txt was fetched -- proven by its
+    // Sitemap: line having actually been parsed into robotsTxt.sitemaps.
+    expect(result.robotsTxt?.sitemaps).toContain("https://user.github.io/repo/sitemap.xml");
+  });
+
+  it("discovers the real sitemap.xml and every URL it lists, not 0", async () => {
+    installProjectSiteFetchMock();
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    const result = await crawlWebsite("https://user.github.io/repo/");
+
+    expect(result.sitemapUrls.length).toBe(8);
+    expect(result.sitemapUrls).toContain("https://user.github.io/repo/blog/post-1.html");
+    expect(result.sitemapUrls).toContain("https://user.github.io/repo/blog/post-6.html");
+  });
+
+  it("actually crawls every sitemap-only article page even though none of them is linked from anywhere on the site", async () => {
+    installProjectSiteFetchMock();
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    const result = await crawlWebsite("https://user.github.io/repo/");
+
+    const successfulUrls = result.pages.filter((p) => p.outcome === "success").map((p) => p.url);
+    for (let i = 1; i <= 6; i++) {
+      expect(successfulUrls).toContain(`https://user.github.io/repo/blog/post-${i}.html`);
+    }
+  });
+
+  it("never fetches the wrong, account-root sitemap.xml as a fallback once the real one is found via robots.txt", async () => {
+    const fetchSpy = vi.fn(async (url: string | URL) => {
+      const page = PROJECT_SITE_PAGES[url.toString()];
+      if (!page) return new Response("not found", { status: 404 });
+      return new Response(page.body, { status: page.status });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const { crawlWebsite } = await import("../../../src/core/crawling/website-crawler.js");
+    await crawlWebsite("https://user.github.io/repo/");
+
+    const requestedUrls = fetchSpy.mock.calls.map((call) => call[0].toString());
+    expect(requestedUrls).not.toContain("https://user.github.io/sitemap.xml");
+  });
 });

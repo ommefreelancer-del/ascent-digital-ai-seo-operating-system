@@ -18,6 +18,19 @@ const webRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PM2_HOME = process.env.PM2_HOME || "C:\\Users\\OMMEKA~1\\.pm2";
 const PM2_ENV = { ...process.env, PM2_HOME };
 
+// PATH-FRAGILITY FIX (2026-09-09): this used to call the bare `pm2` command
+// via `shell: true`, which depends on the global `pm2` shim being on
+// whatever PATH the calling shell/process happens to have -- exactly the
+// class of problem that caused the real incident this health check exists
+// to catch (see prepare-backend.mjs and pm2-watchdog.mjs for the matching
+// npm-not-on-PATH root cause). A health check that itself fails to find
+// `pm2` under a stripped/non-interactive PATH would misreport "PM2 daemon
+// running: false" even when the app is genuinely healthy. Resolve pm2's own
+// local JS entry point directly instead, exactly like pm2-watchdog.mjs
+// already does, so this check's accuracy doesn't depend on shell PATH at all.
+const NODE_EXE = process.env.WATCHDOG_NODE_EXE || "C:\\Program Files\\nodejs\\node.exe";
+const PM2_JS_BIN = process.env.PM2_JS_BIN || path.join(webRoot, "node_modules", "pm2", "bin", "pm2");
+
 const APP_NAME = "adasos-web";
 const PORT = 3000;
 const REQUIRED_ENV_KEYS = ["DATABASE_URL", "NEXTAUTH_SECRET", "NEXTAUTH_URL", "ANTHROPIC_API_KEY"];
@@ -29,7 +42,12 @@ function record(name, ok, detail) {
 
 // 1 + 2. PM2 daemon reachable, and adasos-web online
 function checkPm2() {
-  const proc = spawnSync("pm2", ["jlist"], { env: PM2_ENV, shell: true, encoding: "utf8" });
+  if (!existsSync(PM2_JS_BIN)) {
+    record("PM2 daemon running", false, `pm2 not found at ${PM2_JS_BIN}`);
+    record(`${APP_NAME} process online`, false, "skipped -- PM2 unreachable");
+    return;
+  }
+  const proc = spawnSync(NODE_EXE, [PM2_JS_BIN, "jlist"], { cwd: webRoot, env: PM2_ENV, encoding: "utf8" });
   if (proc.status !== 0 || !proc.stdout) {
     record("PM2 daemon running", false, proc.stderr?.trim() || "pm2 jlist failed");
     record(`${APP_NAME} process online`, false, "skipped -- PM2 unreachable");

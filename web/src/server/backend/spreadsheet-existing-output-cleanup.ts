@@ -1,0 +1,506 @@
+// EXISTING-OUTPUT-TAB SELF-CLEANUP (2026-09-21): a real, explicitly-requested new capability -- every
+// prior Google Sheets write in this codebase only ever APPENDS newly-cleaned records from a SOURCE sheet
+// (e.g. "Health Master Sheet") into a write destination (google-sheets-cleaning.ts,
+// spreadsheet-google-sheets-writeback.ts). Neither path has ever read back one of ADASOS's OWN
+// already-written output tabs (ADMIN_VENDOR_SHEET_NAME / CLIENT_WEBSITES_SHEET_NAME), checked it for
+// duplicate rows against ITSELF, and rewritten it -- a real, confirmed gap: a user's real, final "Admin -
+// Vendor"/"Client Sheet" tabs (downloaded and analyzed offline this session) still contained hundreds of
+// real duplicate rows with no ADASOS capability to remove them.
+//
+// This module closes that gap, narrowly and explicitly:
+//   1. proposeExistingOutputTabCleanup() reads ONE named tab from the user's configured write destination
+//      (read-only -- getAllSpreadsheetValues() with the new sheetName targeting option), runs it through
+//      the SAME already-tested dedup engine every other cleaning path already uses (buildCleaningResult()
+//      -- realignment, exact-duplicate removal, domain-duplicate flagging -- no new dedup algorithm here),
+//      and persists a real PENDING SpreadsheetCleaningApproval row, exactly like every other cleaning
+//      proposal in this codebase. NOTHING is written anywhere by this step.
+//   2. writeApprovedExistingOutputTabCleanupToGoogleSheets() performs the actual write, ONLY after the
+//      approval has been explicitly approved: it CLEARS the named tab and rewrites it with exactly the
+//      retained (de-duplicated) rows from the approved snapshot (google-sheets.ts's new
+//      clearAndReplaceSheetValues() -- the first real "clear and replace" Sheets call in this codebase).
+//      This is a genuinely different, higher-risk operation than the existing append-only write-back, so
+//      it is kept in its own function with its own eligibility check -- never merged into
+//      writeApprovedCleaningToGoogleSheets(), which stays exactly as it was for the source-into-destination
+//      flow.
+//
+// NO SCHEMA CHANGE: this reuses the existing Attachment/SpreadsheetCleaningApproval tables exactly as they
+// are. Attachment.fileType gets a new, distinct marker value (EXISTING_OUTPUT_CLEANUP_FILE_TYPE, alongside
+// the existing "google-sheet" marker used by the source-into-destination flow) so a later approve/write
+// step can tell which real write behavior (append-split vs. clear-and-replace) applies to a given approval
+// -- see writeApprovedCleaningRespectingMode() below, the single place that branches on it.
+// Attachment.originalFileName is reused to carry the TAB NAME being cleaned (e.g. "Admin - Vendor") --
+// the same role it already plays for every other Attachment row (the human-readable name of what's being
+// processed), never a new field.
+
+import { db } from "@/server/db";
+import { getAllSpreadsheetValues, getWriteDestinationSpreadsheet, clearAndReplaceSheetValues, assertSheetsWriteScope, type AllSpreadsheetValuesResult } from "@/server/google-sheets";
+import { getAttachmentMeta } from "./attachments";
+import {
+  buildCleaningResult,
+  buildCleaningAuditCsv,
+  buildFullyDedupedCleaningAuditCsv,
+  collapseDomainDuplicatesToOnePerDomain,
+  detectDomainLevelDedupIntent,
+  KNOWN_LARGE_PLATFORM_DOMAINS,
+  type CleaningResult,
+  type DomainDedupedCleaningResult,
+} from "./spreadsheet-cleaning";
+import { buildXlsxWorkbook } from "./xlsx-writer";
+import { createPendingCleaningApproval } from "./spreadsheet-cleaning-approval";
+import { saveCleaningArtifacts } from "./spreadsheet-cleaning-artifacts";
+import { buildSpreadsheetCleaningApprovalMeta, type SpreadsheetProcessingResult } from "./spreadsheet-cleaning-approval-meta";
+import { writeApprovedCleaningToGoogleSheets, type WriteBackResult } from "./spreadsheet-google-sheets-writeback";
+import { markCleaningApprovalWritten, markCleaningApprovalWriteFailed, type CleaningApprovalRecord } from "./spreadsheet-cleaning-approval";
+import { ADMIN_VENDOR_SHEET_NAME, CLIENT_WEBSITES_SHEET_NAME } from "./spreadsheet-business-schema";
+
+// DOMAIN-LEVEL DEDUP (2026-09-21, RELOCATED 2026-09-24): collapseDomainDuplicatesToOnePerDomain(),
+// KNOWN_LARGE_PLATFORM_DOMAINS, buildFullyDedupedCleaningAuditCsv(), and detectDomainLevelDedupIntent() now
+// live in spreadsheet-cleaning.ts (a dependency-free shared module), so google-sheets-cleaning.ts's
+// source-into-destination flow can use the EXACT same collapse logic and phrase detection this
+// existing-output-tab flow already used -- a real, live-confirmed gap where "one record per domain" was
+// only ever honored by THIS flow, never the other one. Re-exported here so every existing import site in
+// this codebase (tests, route.ts) keeps working unchanged.
+export { collapseDomainDuplicatesToOnePerDomain, KNOWN_LARGE_PLATFORM_DOMAINS, type DomainDedupedCleaningResult };
+
+/** Distinct from the existing "google-sheet" marker (source-into-destination live cleaning) -- lets writeApprovedCleaningRespectingMode() below tell the two write behaviors apart from the approval's own Attachment row, with no schema change. */
+export const EXISTING_OUTPUT_CLEANUP_FILE_TYPE = "google-sheet-existing-tab-cleanup";
+
+/** Same honesty convention as every other ceiling in this codebase -- a real, large existing output tab must never be silently truncated. */
+const MAX_ROWS_FOR_EXISTING_TAB_READ = 200_000;
+
+const MAX_DUPLICATE_GROUPS_SHOWN = 20;
+const MAX_FLAGGED_ROWS_SHOWN = 20;
+
+export interface ProposeExistingOutputTabCleanupOptions {
+  /** Default false (preserves the original, already-tested behavior: exact-duplicate removal only, domain
+   * duplicates flagged for review but never removed). true applies collapseDomainDuplicatesToOnePerDomain()
+   * on top -- exactly one row kept per website/domain, per an explicit user request. See that function's own
+   * header for the exact, stated selection rule -- it ALWAYS protects known large platform domains and
+   * already-priced/dealt records, unconditionally, with no option here to turn that off. */
+  readonly dedupeDomainDuplicates?: boolean;
+  /** Only meaningful when dedupeDomainDuplicates is true. Normalized domains to ALSO leave flagged-only, on
+   * top of the always-on KNOWN_LARGE_PLATFORM_DOMAINS protection -- see
+   * collapseDomainDuplicatesToOnePerDomain()'s own CollapseDomainDuplicatesOptions.additionalExcludedDomains. */
+  readonly additionalExcludedDomains?: readonly string[];
+}
+
+/**
+ * Reads ONE named tab (e.g. ADMIN_VENDOR_SHEET_NAME) from the user's configured Google Sheets WRITE
+ * DESTINATION, runs the same dedup engine every other cleaning path uses, and persists a real pending
+ * approval. Read-only -- never writes, deletes, moves, or overwrites anything. Refuses honestly (never a
+ * guess) when no write destination is configured, the tab can't be read, or the tab is genuinely empty.
+ */
+export async function proposeExistingOutputTabCleanup(userId: string, sheetName: string, options?: ProposeExistingOutputTabCleanupOptions): Promise<SpreadsheetProcessingResult> {
+  const destination = await getWriteDestinationSpreadsheet(userId);
+  if (!destination) {
+    return {
+      ok: false,
+      reply:
+        `No Google Sheets write destination is configured, so there's no spreadsheet to read "${sheetName}" from yet. ` +
+        "Go to Settings -> Integrations and choose a write destination first.",
+    };
+  }
+
+  let readResult: AllSpreadsheetValuesResult;
+  try {
+    readResult = await getAllSpreadsheetValues(userId, destination.id, { sheetName, maxTotalRows: MAX_ROWS_FOR_EXISTING_TAB_READ });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "an unknown error";
+    return { ok: false, reply: `I tried to read the "${sheetName}" tab in "${destination.name}", but the read failed: ${reason}` };
+  }
+
+  if (readResult.rowsRead === 0) {
+    return { ok: false, reply: `The "${sheetName}" tab in "${destination.name}" is genuinely empty (or doesn't exist yet) -- there's nothing to clean.` };
+  }
+
+  const [headerRow, ...dataRows] = readResult.values;
+  const headers = (headerRow ?? []).map((cell) => cell ?? "");
+  const rows = dataRows.map((row) => row.map((cell) => cell ?? ""));
+
+  const baseCleaningResult = buildCleaningResult(headers, rows);
+  const dedupeDomainDuplicates = options?.dedupeDomainDuplicates ?? false;
+  const additionalExcludedDomains = new Set(options?.additionalExcludedDomains ?? []);
+  const domainDedup = dedupeDomainDuplicates ? collapseDomainDuplicatesToOnePerDomain(baseCleaningResult, { additionalExcludedDomains }) : null;
+  const cleaningResult = domainDedup?.result ?? baseCleaningResult;
+
+  const sourceRecord = await db.attachment.create({
+    data: {
+      userId,
+      originalFileName: sheetName,
+      fileType: EXISTING_OUTPUT_CLEANUP_FILE_TYPE,
+      mimeType: "application/vnd.google-apps.spreadsheet",
+      sizeBytes: 0,
+      storagePath: "",
+    },
+  });
+
+  const approval = await createPendingCleaningApproval(userId, sourceRecord.id, cleaningResult);
+
+  // The full, EFFECTIVE excluded-domain set (built-in platforms are ALWAYS excluded -- see
+  // collapseDomainDuplicatesToOnePerDomain()'s own header -- plus whatever additional domains this call
+  // asked for), used only for describing WHICH groups are platform-excluded vs. pricing-protected below.
+  const effectiveExcludedDomains = new Set([...KNOWN_LARGE_PLATFORM_DOMAINS, ...additionalExcludedDomains]);
+
+  const workbook = buildXlsxWorkbook([{ name: sheetName, headers: cleaningResult.headers, rows: cleaningResult.retainedRows }]);
+  const auditCsv = domainDedup
+    ? buildFullyDedupedCleaningAuditCsv(domainDedup.base, new Set(domainDedup.result.retainedRowIndexes), effectiveExcludedDomains)
+    : buildCleaningAuditCsv(cleaningResult);
+  await saveCleaningArtifacts(approval.id, workbook, auditCsv);
+
+  const reply = domainDedup
+    ? buildFullyDedupedExistingOutputCleanupReportForChat(sheetName, destination.name, readResult, domainDedup, approval.id, effectiveExcludedDomains)
+    : buildExistingOutputCleanupReportForChat(sheetName, destination.name, readResult, cleaningResult, approval.id);
+
+  return {
+    ok: true,
+    reply,
+    approvalMeta: buildSpreadsheetCleaningApprovalMeta(sheetName, approval),
+  };
+}
+
+/**
+ * A COMPACT, count-based report mirroring the other cleaning-report builders' section structure --
+ * deliberately includes an explicit warning that this is a CLEAR-AND-REPLACE operation, never an append,
+ * since that is a materially different (and first-of-its-kind) risk than every other write in this
+ * codebase.
+ */
+function buildExistingOutputCleanupReportForChat(sheetName: string, destinationName: string, readResult: AllSpreadsheetValuesResult, result: CleaningResult, approvalId: string): string {
+  const lines: string[] = [];
+  lines.push(
+    `I read the "${sheetName}" tab in "${destinationName}" (ADASOS's own already-written output, not a new source) -- ` +
+      `${readResult.batchesRead} real batch(es), ${readResult.rowsRead} row(s) total read server-side.`,
+  );
+  if (readResult.cappedAtSafetyLimit) {
+    lines.push(`NOTE: reading stopped at a real safety limit (${readResult.rowsRead} rows) rather than a confirmed end of data -- this tab may genuinely have more rows beyond what was processed here.`);
+  }
+
+  const exactDuplicateRowTotal = result.exactDuplicateGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+  const removedCount = result.originalRowCount - result.retainedRowIndexes.length;
+  const domainDuplicateRowTotal = result.domainDuplicateGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+
+  lines.push("");
+  lines.push("=== A. SELF-DEDUP PROPOSAL ===");
+  lines.push(`Columns (${result.headers.length}): ${result.headers.join(", ")}`);
+  lines.push(`Retained records: ${result.retainedRowIndexes.length} (of ${result.originalRowCount} original rows in this tab -- ${removedCount} exact-duplicate row(s) proposed for removal, everything else preserved).`);
+  lines.push("A real, downloadable de-duplicated workbook and a CSV cleaning audit are attached to this message below -- review both before deciding.");
+
+  lines.push("");
+  lines.push("=== B. DUPLICATE AUDIT ===");
+  if (result.exactDuplicateGroups.length === 0) {
+    lines.push("Exact duplicates: none found.");
+  } else {
+    lines.push(`Exact duplicates: ${result.exactDuplicateGroups.length} group(s), ${exactDuplicateRowTotal} row(s) total -- one canonical occurrence kept per group, the rest proposed for removal.`);
+    for (const group of result.exactDuplicateGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
+      const [keepRow, ...removedRows] = group.rowIndexes.map((i) => i + 1);
+      lines.push(`  - Keep data row ${keepRow}; remove data row(s) ${removedRows.join(", ")} -- reason: identical values in every column.`);
+    }
+    if (result.exactDuplicateGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
+      lines.push(`  ...and ${result.exactDuplicateGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more exact-duplicate group(s).`);
+    }
+  }
+  lines.push("");
+  if (result.domainDuplicateGroups.length === 0) {
+    lines.push("Domain/URL duplicate candidates (same normalized domain, other fields differ -- flagged for review, NOT removed): none found.");
+  } else {
+    lines.push(`Domain/URL duplicate candidates: ${result.domainDuplicateGroups.length} group(s), ${domainDuplicateRowTotal} row(s) total -- flagged for your review, NOT automatically removed:`);
+    for (const group of result.domainDuplicateGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
+      lines.push(`  - Domain "${group.normalizedDomain}": data row(s) ${group.rowIndexes.map((i) => i + 1).join(", ")}.`);
+    }
+    if (result.domainDuplicateGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
+      lines.push(`  ...and ${result.domainDuplicateGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more domain-duplicate group(s).`);
+    }
+  }
+
+  lines.push("");
+  lines.push("=== C. DATA-QUALITY AUDIT ===");
+  lines.push(`Malformed URLs: ${result.malformedUrlRows.length}.`);
+  for (const flag of result.malformedUrlRows.slice(0, MAX_FLAGGED_ROWS_SHOWN)) {
+    lines.push(`  - Data row ${flag.rowIndex + 1}: "${flag.rawValue}" does not parse as a real domain/URL.`);
+  }
+  if (result.malformedUrlRows.length > MAX_FLAGGED_ROWS_SHOWN) lines.push(`  ...and ${result.malformedUrlRows.length - MAX_FLAGGED_ROWS_SHOWN} more.`);
+  lines.push(`Clearly incomplete records: ${result.incompleteRows.length}.`);
+  if (result.incompleteRows.length > 0) lines.push("  (see the attached audit CSV for every flagged row)");
+
+  lines.push("");
+  lines.push("=== D. WHAT APPROVING THIS DOES (READ CAREFULLY) ===");
+  lines.push(
+    `Unlike every other cleaning proposal in ADASOS, approving this one does NOT append new rows -- it CLEARS the entire "${sheetName}" tab ` +
+      `and REWRITES it with exactly the ${result.retainedRowIndexes.length} retained record(s) above. Every row currently in "${sheetName}" that is ` +
+      "not one of the retained records (i.e. every extra exact-duplicate occurrence) will be permanently removed from that tab. Nothing outside " +
+      `"${sheetName}" is touched.`,
+  );
+
+  lines.push("");
+  lines.push(
+    `Nothing has been written to, cleared from, or moved in "${sheetName}" yet -- this is a proposal only. ` +
+      `Use the Approve / Reject buttons above to decide, or reply "approve"/"reject" in chat -- either way requires your explicit action. (Approval reference: ${approvalId})`,
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Same section structure as buildExistingOutputCleanupReportForChat(), for the full-domain-dedup mode --
+ * section B now reports domain duplicates as REMOVED (one kept per domain), not merely flagged, and section
+ * A's headline count reflects the combined exact + domain removal.
+ */
+function buildFullyDedupedExistingOutputCleanupReportForChat(sheetName: string, destinationName: string, readResult: AllSpreadsheetValuesResult, domainDedup: DomainDedupedCleaningResult, approvalId: string, excludedDomains: ReadonlySet<string>): string {
+  const { base, result } = domainDedup;
+  const protectedGroups = new Set([...domainDedup.excludedDomainGroups, ...domainDedup.pricingProtectedGroups]);
+  const collapsedGroups = base.domainDuplicateGroups.filter((g) => !protectedGroups.has(g));
+  const lines: string[] = [];
+  lines.push(
+    `I read the "${sheetName}" tab in "${destinationName}" (ADASOS's own already-written output, not a new source) -- ` +
+      `${readResult.batchesRead} real batch(es), ${readResult.rowsRead} row(s) total read server-side.`,
+  );
+  if (readResult.cappedAtSafetyLimit) {
+    lines.push(`NOTE: reading stopped at a real safety limit (${readResult.rowsRead} rows) rather than a confirmed end of data -- this tab may genuinely have more rows beyond what was processed here.`);
+  }
+
+  // RAW group-membership total -- includes the ONE canonical/kept row of every exact-duplicate group, not
+  // just the removed "extras". Used only for the "N row(s) total" description in section B below -- NEVER
+  // as a removed-row count (that conflation was itself a real reconciliation bug -- see the fix below).
+  const exactDuplicateRawMemberTotal = base.exactDuplicateGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+  // ACTUAL removed count -- one row per group is always kept, so this is raw membership minus the number of
+  // groups (exactly what buildCleaningResult()'s own exactDuplicateExtraIndexes tracks internally). This,
+  // not exactDuplicateRawMemberTotal, is the number that reconciles with base.originalRowCount below.
+  const exactDuplicateActualRemovedCount = exactDuplicateRawMemberTotal - base.exactDuplicateGroups.length;
+  // RECONCILING total -- see collapseDomainDuplicatesToOnePerDomain()'s own header on why this (not
+  // domainDuplicateRemovedRowIndexes.size) is the number that sums correctly with the exact-removed count.
+  const domainDuplicateAdditionalRemovedTotal = domainDedup.domainDuplicateAdditionalRemovedRowIndexes.size;
+  // RAW total -- every non-canonical member of every collapsed domain group, INCLUDING rows also counted
+  // under exact-duplicate removal. Shown separately (never summed into the headline) purely so the
+  // per-domain group listing below (which lists every raw member) isn't seen as contradicting the totals.
+  const domainDuplicateRawGroupMemberTotal = collapsedGroups.reduce((sum, g) => sum + g.rowIndexes.length - 1, 0);
+  const overlapWithExactDuplicates = domainDuplicateRawGroupMemberTotal - domainDuplicateAdditionalRemovedTotal;
+  const totalRemoved = exactDuplicateActualRemovedCount + domainDuplicateAdditionalRemovedTotal;
+
+  lines.push("");
+  lines.push("=== A. SELF-DEDUP PROPOSAL (FULL DOMAIN DEDUP) ===");
+  lines.push(`Columns (${result.headers.length}): ${result.headers.join(", ")}`);
+  lines.push(
+    `Retained records: ${result.retainedRowIndexes.length} (of ${base.originalRowCount} original rows in this tab -- ${totalRemoved} row(s) proposed for removal: ` +
+      `${exactDuplicateActualRemovedCount} exact-duplicate row(s), plus ${domainDuplicateAdditionalRemovedTotal} additional row(s) removed to keep exactly ONE record per website/domain` +
+      (excludedDomains.size > 0 ? `, excluding ${excludedDomains.size} known large platform domain(s) -- see below` : "") +
+      ").",
+  );
+  lines.push(
+    'Selection rule for which row is kept per domain: the row with the LOWEST original row number in this tab (same convention already used for exact duplicates) -- never a guess based on which row "looks more complete".',
+  );
+  lines.push("A real, downloadable de-duplicated workbook and a CSV cleaning audit are attached to this message below -- review both before deciding.");
+
+  lines.push("");
+  lines.push("=== B. DUPLICATE AUDIT ===");
+  if (base.exactDuplicateGroups.length === 0) {
+    lines.push("Exact duplicates: none found.");
+  } else {
+    lines.push(
+      `Exact duplicates: ${base.exactDuplicateGroups.length} group(s), ${exactDuplicateRawMemberTotal} row(s) total (one canonical occurrence per group + its extras) -- ` +
+        `${exactDuplicateActualRemovedCount} extra row(s) removed, one kept per group.`,
+    );
+  }
+  lines.push("");
+  if (collapsedGroups.length === 0) {
+    lines.push("Domain/URL duplicate candidates collapsed to one record per domain: none.");
+  } else {
+    lines.push(
+      `Domain/URL duplicate candidates: ${collapsedGroups.length} group(s), ${domainDuplicateRawGroupMemberTotal} row(s) total beyond the kept one -- ` +
+        `${overlapWithExactDuplicates} of those were ALREADY removed as exact duplicates above (not double-counted), so this step removes ` +
+        `${domainDuplicateAdditionalRemovedTotal} genuinely ADDITIONAL row(s):`,
+    );
+    for (const group of collapsedGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
+      const sorted = [...group.rowIndexes].sort((a, b) => a - b);
+      const [keepRow, ...removedRows] = sorted.map((i) => i + 1);
+      lines.push(`  - Domain "${group.normalizedDomain}": keep data row ${keepRow}; remove data row(s) ${removedRows.join(", ")}.`);
+    }
+    if (collapsedGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
+      lines.push(`  ...and ${collapsedGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more domain-duplicate group(s) -- see the attached audit CSV for the complete list.`);
+    }
+  }
+
+  if (domainDedup.excludedDomainGroups.length > 0) {
+    const excludedRowTotal = domainDedup.excludedDomainGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+    lines.push("");
+    lines.push(
+      `EXCLUDED from domain-level collapsing (known large platform domains -- every row kept, only flagged for review, exactly like the default mode): ` +
+        `${domainDedup.excludedDomainGroups.length} domain(s), ${excludedRowTotal} row(s) total.`,
+    );
+    for (const group of domainDedup.excludedDomainGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
+      lines.push(`  - Domain "${group.normalizedDomain}": data row(s) ${group.rowIndexes.map((i) => i + 1).join(", ")} -- all retained.`);
+    }
+    if (domainDedup.excludedDomainGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
+      lines.push(`  ...and ${domainDedup.excludedDomainGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more excluded domain(s) -- see the attached audit CSV for the complete list.`);
+    }
+  }
+
+  if (domainDedup.pricingProtectedGroups.length > 0) {
+    const protectedRowTotal = domainDedup.pricingProtectedGroups.reduce((sum, g) => sum + g.rowIndexes.length, 0);
+    lines.push("");
+    lines.push(
+      `KEPT BOTH FOR REVIEW (two or more records for the same domain already carry real pricing/deal data -- never auto-resolved, per "if both duplicates are protected deal/priced records, keep both for review"): ` +
+        `${domainDedup.pricingProtectedGroups.length} domain(s), ${protectedRowTotal} row(s) total.`,
+    );
+    for (const group of domainDedup.pricingProtectedGroups.slice(0, MAX_DUPLICATE_GROUPS_SHOWN)) {
+      lines.push(`  - Domain "${group.normalizedDomain}": data row(s) ${group.rowIndexes.map((i) => i + 1).join(", ")} -- all retained, flagged for manual review.`);
+    }
+    if (domainDedup.pricingProtectedGroups.length > MAX_DUPLICATE_GROUPS_SHOWN) {
+      lines.push(`  ...and ${domainDedup.pricingProtectedGroups.length - MAX_DUPLICATE_GROUPS_SHOWN} more -- see the attached audit CSV for the complete list.`);
+    }
+  }
+
+  lines.push("");
+  lines.push("=== C. DATA-QUALITY AUDIT ===");
+  lines.push(`Malformed URLs: ${base.malformedUrlRows.length}.`);
+  for (const flag of base.malformedUrlRows.slice(0, MAX_FLAGGED_ROWS_SHOWN)) {
+    lines.push(`  - Data row ${flag.rowIndex + 1}: "${flag.rawValue}" does not parse as a real domain/URL.`);
+  }
+  if (base.malformedUrlRows.length > MAX_FLAGGED_ROWS_SHOWN) lines.push(`  ...and ${base.malformedUrlRows.length - MAX_FLAGGED_ROWS_SHOWN} more.`);
+  lines.push(`Clearly incomplete records: ${base.incompleteRows.length}.`);
+  if (base.incompleteRows.length > 0) lines.push("  (see the attached audit CSV for every flagged row)");
+
+  lines.push("");
+  lines.push("=== D. RECONCILIATION (rows read = removed + retained, exactly) ===");
+  lines.push(`Rows read:                                            ${base.originalRowCount}`);
+  lines.push(`Exact-duplicate removals (extras only, one kept per group):     ${exactDuplicateActualRemovedCount}`);
+  lines.push(`Domain-duplicate removals (additional -- excludes overlap with exact-duplicate removals above): ${domainDuplicateAdditionalRemovedTotal}`);
+  lines.push(`Total removed:                                        ${totalRemoved}  (= ${exactDuplicateActualRemovedCount} + ${domainDuplicateAdditionalRemovedTotal})`);
+  lines.push(`Retained rows:                                        ${result.retainedRowIndexes.length}`);
+  lines.push(
+    `Check: ${totalRemoved} removed + ${result.retainedRowIndexes.length} retained = ${totalRemoved + result.retainedRowIndexes.length} -- ` +
+      `${totalRemoved + result.retainedRowIndexes.length === base.originalRowCount ? "MATCHES rows read." : "DOES NOT MATCH rows read -- this would be a real defect."}`,
+  );
+
+  lines.push("");
+  lines.push("=== E. WHAT APPROVING THIS DOES (READ CAREFULLY) ===");
+  lines.push(
+    `Approving this CLEARS the entire "${sheetName}" tab and REWRITES it with exactly the ${result.retainedRowIndexes.length} retained record(s) above -- ` +
+      `every extra exact-duplicate occurrence AND every extra same-domain row (i.e. everything except the one kept record per domain) will be permanently removed from that tab. ` +
+      `Nothing outside "${sheetName}" is touched.`,
+  );
+
+  lines.push("");
+  lines.push(
+    `Nothing has been written to, cleared from, or moved in "${sheetName}" yet -- this is a proposal only. ` +
+      `Use the Approve / Reject buttons above to decide, or reply "approve"/"reject" in chat -- either way requires your explicit action. (Approval reference: ${approvalId})`,
+  );
+  return lines.join("\n");
+}
+
+/**
+ * The FIRST real "clear and replace" write in this codebase -- see google-sheets.ts's
+ * clearAndReplaceSheetValues() header. Refuses for any status other than "approved"/"write_failed" (a
+ * genuine retry), exactly like writeApprovedCleaningToGoogleSheets()'s own eligibility check. On success,
+ * reuses the SAME generic markCleaningApprovalWritten()/markCleaningApprovalWriteFailed() functions the
+ * append-based path uses -- deliberately does NOT touch adminVendorWrittenAt/clientWebsitesWrittenAt,
+ * which are semantically tied to the two-tab append-split flow and would be misleading here (this writes
+ * exactly one tab, not a traffic-split pair).
+ */
+export interface ExistingTabWriteBackResult {
+  readonly ok: boolean;
+  readonly error?: string;
+  readonly tabName: string;
+  readonly rowsWritten?: number;
+}
+
+const WRITE_ELIGIBLE_STATUSES: readonly CleaningApprovalRecord["status"][] = ["approved", "write_failed"];
+
+export async function writeApprovedExistingOutputTabCleanupToGoogleSheets(userId: string, approval: CleaningApprovalRecord, spreadsheetId: string, sheetName: string): Promise<ExistingTabWriteBackResult> {
+  if (!WRITE_ELIGIBLE_STATUSES.includes(approval.status)) {
+    return { ok: false, tabName: sheetName, error: `Refusing to write -- this cleaning result's status is "${approval.status}". Nothing was sent to Google Sheets.` };
+  }
+
+  try {
+    await assertSheetsWriteScope(userId);
+    await clearAndReplaceSheetValues(userId, spreadsheetId, sheetName, approval.result.headers, approval.result.retainedRows);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "an unknown error";
+    await markCleaningApprovalWriteFailed(userId, approval.id);
+    return { ok: false, tabName: sheetName, error: `The clear-and-replace write to "${sheetName}" failed: ${reason}` };
+  }
+
+  const marked = await markCleaningApprovalWritten(userId, approval.id);
+  if (!marked.ok) {
+    return { ok: false, tabName: sheetName, error: `The write to "${sheetName}" succeeded, but recording it failed: ${marked.error}` };
+  }
+  return { ok: true, tabName: sheetName, rowsWritten: approval.result.retainedRowIndexes.length };
+}
+
+/**
+ * SINGLE DISPATCH POINT (2026-09-21): every existing approve/write call site (the chat-text "approve"
+ * reply in spreadsheet-processing.ts, and the two form-action buttons in spreadsheet-cleaning-actions.ts)
+ * used to call writeApprovedCleaningToGoogleSheets() unconditionally -- correct for every approval that
+ * existed before this module, since only the append-split flow existed. Now that a genuinely different
+ * write behavior exists for this new approval type, this is the ONE place that decides which real write
+ * function applies to a given approval, by reading the approval's own Attachment.fileType marker (no
+ * schema change -- see this module's own header). Every call site is updated to call THIS function instead
+ * of writeApprovedCleaningToGoogleSheets() directly, so the branch only ever lives in one place.
+ */
+export type WriteBackDispatchResult = { readonly mode: "append-split"; readonly result: WriteBackResult } | { readonly mode: "existing-tab-replace"; readonly result: ExistingTabWriteBackResult };
+
+export async function writeApprovedCleaningRespectingMode(userId: string, approval: CleaningApprovalRecord, spreadsheetId: string): Promise<WriteBackDispatchResult> {
+  const attachment = await getAttachmentMeta(userId, approval.attachmentId);
+  if (attachment?.fileType === EXISTING_OUTPUT_CLEANUP_FILE_TYPE) {
+    const result = await writeApprovedExistingOutputTabCleanupToGoogleSheets(userId, approval, spreadsheetId, attachment.originalFileName);
+    return { mode: "existing-tab-replace", result };
+  }
+  const result = await writeApprovedCleaningToGoogleSheets(userId, approval, spreadsheetId);
+  return { mode: "append-split", result };
+}
+
+const ADMIN_VENDOR_MENTION = /\badmin[\s-]*vendor\b/i;
+const CLIENT_SHEET_MENTION = /\bclient sheet\b/i;
+const DEDUP_ACTION_PHRASES = /\b(duplicate|duplicates|dedup|de-dup|remove\s+duplicate|clean\s*up|rewrite)\b/i;
+
+/**
+ * ROUTING TARGET DETECTION (2026-09-21): distinguishes a request to self-dedupe one of ADASOS's OWN
+ * already-written output tabs from the pre-existing "clean a SOURCE sheet into the configured destination"
+ * flow (processSelectedGoogleSheet() in google-sheets-cleaning.ts) -- which is what
+ * looksLikeSpreadsheetOperationRequest() in spreadsheet-processing.ts already detects and stays completely
+ * unaffected by this. Deliberately narrow: requires BOTH a real mention of one of the two fixed,
+ * system-defined output-tab names (never a user-chosen source/destination name) AND real dedup/cleanup
+ * action language -- a bare "email the client sheet" or "the admin vendor spoke to me" does not match.
+ * Returns null when neither tab is mentioned, or no dedup action is present. The domain-level-dedup /
+ * platform-exclusion intent (dedupeByDomain / excludePlatformDomains) is detected by the SAME shared
+ * detectDomainLevelDedupIntent() (spreadsheet-cleaning.ts) that google-sheets-cleaning.ts's
+ * source-into-destination flow now also uses -- never two separate phrase-matching implementations.
+ */
+export interface ExistingOutputTabSelfCleanupTargets {
+  readonly adminVendor: boolean;
+  readonly clientSheet: boolean;
+  readonly dedupeByDomain: boolean;
+  readonly excludePlatformDomains: boolean;
+}
+
+export function detectExistingOutputTabSelfCleanupRequest(message: string): ExistingOutputTabSelfCleanupTargets | null {
+  const adminVendor = ADMIN_VENDOR_MENTION.test(message);
+  const clientSheet = CLIENT_SHEET_MENTION.test(message);
+  if (!adminVendor && !clientSheet) return null;
+  if (!DEDUP_ACTION_PHRASES.test(message)) return null;
+  const { dedupeByDomain, excludePlatformDomains } = detectDomainLevelDedupIntent(message);
+  return { adminVendor, clientSheet, dedupeByDomain, excludePlatformDomains };
+}
+
+/**
+ * Real dispatch helper for the chat route: runs proposeExistingOutputTabCleanup() for exactly ONE tab per
+ * request, even when both are mentioned. Deliberate, NOT a shortcut -- resolveCleaningApprovalReply() and
+ * the bare-text "approve" chat reply resolve against "the single most recent PENDING approval" (see
+ * spreadsheet-processing.ts), so proposing two tabs' worth of pending approvals in the same turn would make
+ * a later bare "approve" reply ambiguous about which tab it targets -- unacceptable for a real, destructive
+ * clear-and-replace write. Admin - Vendor is prioritized when both are mentioned (it was the tab explicitly
+ * named in the original request that motivated this feature); the reply explicitly tells the user the other
+ * tab was deferred and how to ask for it next.
+ */
+export async function proposeExistingOutputTabCleanupForChat(userId: string, targets: ExistingOutputTabSelfCleanupTargets): Promise<SpreadsheetProcessingResult> {
+  const sheetName = targets.adminVendor ? ADMIN_VENDOR_SHEET_NAME : CLIENT_WEBSITES_SHEET_NAME;
+  // Known large platform domains are ALWAYS protected by collapseDomainDuplicatesToOnePerDomain() itself
+  // now (see its own header) -- targets.excludePlatformDomains no longer needs to be threaded through here;
+  // it still contributes to detectDomainLevelDedupIntent()'s dedupeByDomain trigger (mentioning platform
+  // exclusion implies wanting domain-level dedup at all).
+  const result = await proposeExistingOutputTabCleanup(userId, sheetName, { dedupeDomainDuplicates: targets.dedupeByDomain });
+  if (targets.adminVendor && targets.clientSheet && result.ok) {
+    return {
+      ...result,
+      reply: `${result.reply}\n\n(You also mentioned "${CLIENT_WEBSITES_SHEET_NAME}" -- to avoid an ambiguous approval once two proposals are pending at once, I've only proposed "${sheetName}" here. Ask me to clean up "${CLIENT_WEBSITES_SHEET_NAME}" separately once you've decided on this one.)`,
+    };
+  }
+  return result;
+}
