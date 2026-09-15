@@ -329,13 +329,13 @@ describe("processSelectedGoogleSheet -- domain-level dedup (2026-09-24 fix): 'on
     expect(retainedUrls.filter((u) => u?.includes("medicalnewstoday.com"))).toHaveLength(1);
   });
 
-  it("without a message (or one that doesn't ask for domain-level dedup), domain duplicates are still only FLAGGED, never removed -- unchanged default behavior", async () => {
+  it("with NO message at all, domain duplicates are still only FLAGGED, never removed -- unchanged default behavior for the pre-existing callers/tests that never pass a message", async () => {
     getSelectedSpreadsheetMock.mockResolvedValue({ id: "health-source-id", name: "Admin Sheet Health-FINAL" });
     const rows = healthFixtureRows();
     getAllSpreadsheetValuesMock.mockResolvedValue({ values: rows, rowsRead: rows.length - 1, batchesRead: 1, cappedAtSafetyLimit: false });
     const userId = await createTestUser();
 
-    const result = await processSelectedGoogleSheet(userId, "Clean the selected Health source and write the result to the destination.");
+    const result = await processSelectedGoogleSheet(userId);
     expect(result.ok).toBe(true);
     const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
     createdAttachmentIds.push(approval!.attachmentId);
@@ -343,6 +343,33 @@ describe("processSelectedGoogleSheet -- domain-level dedup (2026-09-24 fix): 'on
     expect(result.reply).toContain("Retained records: 6"); // nothing removed -- only exact-dup removal applies, and there are none here
     expect(result.reply).toContain("flagged for your review, NOT automatically removed");
     expect(result.reply).not.toContain("EXCLUDED from domain-level collapsing");
+  });
+
+  // ALWAYS-ON FIX (2026-09-15): a real, live-reported gap found via a "flashlight" validation of the two
+  // most recent fixes together -- a genuine follow-up/revalidation message ("Now validate this live -- run
+  // it again and confirm the result.") has no "permanent"/"rule"/"one record per domain" language in ITS
+  // OWN text, so phrase-based detection (even after two rounds of widening the phrase list) silently kept
+  // reverting to flag-only behavior on every re-run. Since EVERY real chat-triggered call here already only
+  // fires after looksLikeSpreadsheetOperationRequest() matched (route.ts's own dispatch gate), a `message`
+  // being present at all now means domain-level collapse always applies -- no phrase required, matching how
+  // platform-exclusion/pricing-protection are already unconditional. This intentionally supersedes the old
+  // "message present but no dedup phrase -> flag only" behavior the test above used to cover.
+  it("REGRESSION (live-reported via flashlight validation): a message with NO domain-dedup phrasing at all -- including a genuine revalidation follow-up -- still collapses domain duplicates, since ANY real chat message reaching this function already means a cleaning/validation request", async () => {
+    getSelectedSpreadsheetMock.mockResolvedValue({ id: "health-source-id", name: "Admin Sheet Health-FINAL" });
+    const rows = healthFixtureRows();
+    getAllSpreadsheetValuesMock.mockResolvedValue({ values: rows, rowsRead: rows.length - 1, batchesRead: 1, cappedAtSafetyLimit: false });
+    const userId = await createTestUser();
+
+    for (const message of ["Clean the selected Health source and write the result to the destination.", "Now validate this live — run it again and confirm the result."]) {
+      const result = await processSelectedGoogleSheet(userId, message);
+      expect(result.ok).toBe(true);
+      const approval = await db.spreadsheetCleaningApproval.findFirst({ where: { userId }, orderBy: { createdAt: "desc" } });
+      createdAttachmentIds.push(approval!.attachmentId);
+
+      expect(result.reply).toContain("Retained records: 5"); // medicalnewstoday.com collapsed 2 -> 1
+      expect(result.reply).toContain("EXCLUDED from domain-level collapsing");
+      expect(result.reply).toContain('Domain "linkedin.com"');
+    }
   });
 
   // PERMANENT-RULES REFERENCE FIX (2026-09-15): PDF-documented, live-reported regression -- the project's

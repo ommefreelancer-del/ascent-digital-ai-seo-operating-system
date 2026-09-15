@@ -33,7 +33,6 @@ import {
   buildFullyDedupedCleaningAuditCsv,
   realignColumnShiftedRow,
   collapseDomainDuplicatesToOnePerDomain,
-  detectDomainLevelDedupIntent,
   detectPricingColumns,
   KNOWN_LARGE_PLATFORM_DOMAINS,
   type CleaningResult,
@@ -204,19 +203,24 @@ export async function processSelectedGoogleSheet(userId: string, message?: strin
   // an uploaded multi-section export -- never a second, separate implementation for the live-sheet case.
   const baseCleaningResult = buildCleaningResult(headers, rows);
 
-  // DOMAIN-LEVEL DEDUP (2026-09-24): a real, live-confirmed gap -- a request like "Remove exact duplicates
-  // and apply one-record-per-domain cleanup, excluding large platform domains" reached THIS flow (source
-  // sheet -> configured destination), not the existing-output-tab self-cleanup flow (which only recognizes
-  // "Admin - Vendor"/"Client Sheet" by name) -- and this flow never applied domain-level collapsing at all,
-  // only ever flagging domain duplicates for manual review. detectDomainLevelDedupIntent() (shared with
-  // that other flow, spreadsheet-cleaning.ts) and collapseDomainDuplicatesToOnePerDomain() close that gap
-  // here too, so "one record per domain" is honored automatically whenever the request text asks for it,
-  // regardless of which flow the request reaches. Optional `message` (omitted by every pre-existing
-  // caller/test) preserves the exact prior default (exact-duplicate removal only, domain duplicates
-  // flagged) when absent. collapseDomainDuplicatesToOnePerDomain() itself ALWAYS protects known large
-  // platform domains and already-priced/dealt records -- see its own header -- no options needed here.
-  const intent = message ? detectDomainLevelDedupIntent(message) : { dedupeByDomain: false };
-  const domainDedup: DomainDedupedCleaningResult | null = intent.dedupeByDomain ? collapseDomainDuplicatesToOnePerDomain(baseCleaningResult) : null;
+  // DOMAIN-LEVEL DEDUP IS ALWAYS APPLIED FOR A REAL CHAT REQUEST (2026-09-15, supersedes the 2026-09-24
+  // phrase-gated version): a real, live-reported gap -- a genuine follow-up/revalidation of a Health Sheet
+  // cleaning task ("Now validate this live -- run it again and confirm the result.") has none of
+  // "permanent"/"rule"/"one record per domain" in ITS OWN text, so phrase-based intent detection kept
+  // silently reverting to flag-only behavior on every re-run, even after widening the phrase list twice.
+  // The underlying problem: domain-level collapse, platform-exclusion, and pricing-protection together
+  // ARE "the permanent duplicate-cleaning rules" this capability exists to apply -- never a situational,
+  // phrase-triggered option -- exactly as collapseDomainDuplicatesToOnePerDomain() below already treats
+  // platform-exclusion and pricing-protection (unconditional, no options needed -- see its own header).
+  // Every real chat-triggered call reaches this function only after looksLikeSpreadsheetOperationRequest()
+  // already matched (route.ts's own dispatch gate) -- so `message` being present at all already means
+  // this is a genuine cleaning/validation request, and domain-level collapse now always applies to it,
+  // regardless of the request's own exact wording. The `message === undefined` branch is UNCHANGED (still
+  // flag-only, domain duplicates left uncollapsed) -- reserved for the pre-existing callers/tests that
+  // never pass a message at all, exercising unrelated concerns (row-count safety limits, business-schema
+  // output, destination-protection reporting) that never intended to test domain-dedup triggering.
+  const dedupeByDomain = Boolean(message);
+  const domainDedup: DomainDedupedCleaningResult | null = dedupeByDomain ? collapseDomainDuplicatesToOnePerDomain(baseCleaningResult) : null;
   const cleaningResult = domainDedup?.result ?? baseCleaningResult;
 
   const sourceRecord = await db.attachment.create({
@@ -293,9 +297,9 @@ function buildLiveSheetCleaningReportForChat(
     );
   }
 
-  // DOMAIN-LEVEL DEDUP (2026-09-24): when the user's own message asked for "one record per domain" (see
-  // detectDomainLevelDedupIntent() in spreadsheet-cleaning.ts), `result` here is ALREADY the collapsed
-  // result (domainDedup.result) -- `domainDedup.base` is the exact-dedup-only result underneath it, needed
+  // DOMAIN-LEVEL DEDUP (2026-09-15): whenever this was reached via a real chat message (see the always-on
+  // dedupeByDomain = Boolean(message) above), `result` here is ALREADY the collapsed result
+  // (domainDedup.result) -- `domainDedup.base` is the exact-dedup-only result underneath it, needed
   // to report the real, raw domain-duplicate-group data (which domains, which rows) the collapse acted on.
   // The default (domainDedup === null) branches below are BYTE-IDENTICAL to this function's prior behavior.
   const base = domainDedup?.base ?? result;
