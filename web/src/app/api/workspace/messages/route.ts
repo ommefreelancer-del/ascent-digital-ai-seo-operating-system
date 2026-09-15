@@ -819,6 +819,31 @@ export async function POST(request: Request) {
     const forceSpreadsheetProcessing =
       !cleaningApprovalReply.handled && Boolean(attachmentMeta) && SPREADSHEET_FILE_TYPES.has(attachmentMeta!.fileType) && looksLikeSpreadsheetOperationRequest(message);
 
+    // GOOGLE SHEETS RE-VALIDATION STRUCTURAL BYPASS (2026-09-15): a real, live-reported defect -- a
+    // follow-up "validate"/"re-check"/"run this again" message asking to re-run the read-only Google
+    // Sheets cleaning against the currently selected sheet was instead answered from stale conversation
+    // history (reusing the PREVIOUS turn's real cleaning result) instead of executing a fresh read. Root
+    // cause: unlike the attachment case above (forceSpreadsheetProcessing, a genuine structural bypass),
+    // the chat-only "clean the selected/connected sheet" branches further below still depend entirely on
+    // THIS message freshly re-scoring high enough for TagWeightedRoutingStrategy to reassign
+    // GOOGLE_SHEETS_INTEGRATION_AGENT_ID -- but hasSpreadsheetProcessingIntent() (tag-weighted-routing-
+    // strategy.ts) only boosts that agent's score when a spreadsheet ATTACHMENT is present, so a short,
+    // attachment-free follow-up using generic verbs ("validate", "check", "review") can score higher for
+    // an unrelated specialist (or fail to assign at all), which then falls into the auditUrl/generic-LLM-
+    // reply branches below and answers from whatever the model still remembers from earlier in the
+    // conversation. Fires ONLY when this exact session's own last REAL agent assignment was already
+    // Google Sheets Integration Agent -- the SAME domain-continuity anchor follow-up-routing.ts's Rule 3
+    // already uses for Website Audit Agent -- and the message doesn't look like a new, unrelated task
+    // (looksLikeNewTask, computed above), so a message that merely shares vocabulary but has no real
+    // prior Google Sheets context in this session is never hijacked into this flow.
+    const forceGoogleSheetsRevalidation =
+      !cleaningApprovalReply.handled &&
+      !forceSpreadsheetProcessing &&
+      !(attachmentMeta && SPREADSHEET_FILE_TYPES.has(attachmentMeta.fileType)) &&
+      lastRealAgentAssignment?.agentId === GOOGLE_SHEETS_INTEGRATION_AGENT_ID &&
+      !looksLikeNewTask &&
+      looksLikeSpreadsheetOperationRequest(message);
+
     if (cleaningApprovalReply.handled) {
       assistantContent = cleaningApprovalReply.reply!;
     } else if (forceSpreadsheetProcessing) {
@@ -829,6 +854,18 @@ export async function POST(request: Request) {
       } catch (error) {
         const reason = error instanceof Error ? error.message : "an unknown error";
         assistantContent = `I found the attached file "${attachmentMeta!.originalFileName}", but reading it failed: ${reason}`;
+      }
+    } else if (forceGoogleSheetsRevalidation) {
+      try {
+        const existingOutputTargets = detectExistingOutputTabSelfCleanupRequest(message);
+        const processingResult = existingOutputTargets
+          ? await proposeExistingOutputTabCleanupForChat(userId, existingOutputTargets)
+          : await processSelectedGoogleSheet(userId, message);
+        assistantContent = processingResult.reply;
+        spreadsheetCleaningApproval = processingResult.approvalMeta ?? null;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "an unknown error";
+        assistantContent = `I tried to re-run the read-only Google Sheets cleaning validation against your currently selected sheet, but it failed: ${reason}`;
       }
     } else if (decision?.status === "human_approval_gate") {
       // HUMAN APPROVAL GATE ROUTING FIX (2026-08-19): reaches the real

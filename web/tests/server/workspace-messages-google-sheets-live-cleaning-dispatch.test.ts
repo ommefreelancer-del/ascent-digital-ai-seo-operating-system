@@ -26,7 +26,13 @@ describe("workspace messages route -- live dispatch reaches processSelectedGoogl
   });
 
   it("the live-sheet branch never calls processSpreadsheetAttachment -- it is mutually exclusive with the attachment/raw-row path, not layered on top of it", () => {
-    const liveSheetBranchIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId, message)");
+    // lastIndexOf, not indexOf: the GOOGLE SHEETS RE-VALIDATION STRUCTURAL BYPASS (2026-09-15, see
+    // route.ts's own header) also calls processSelectedGoogleSheet(userId, message) verbatim, EARLIER in
+    // the file, as a fallback when this decision-gated branch below never gets reached at all. These
+    // assertions are specifically about the ORIGINAL, decision-gated branch's own isolation -- the LAST
+    // occurrence in the file -- not the new bypass, which has its own dedicated coverage (see
+    // workspace-messages-google-sheets-revalidation-dispatch.test.ts).
+    const liveSheetBranchIdx = routeSource.lastIndexOf("await processSelectedGoogleSheet(userId, message)");
     expect(liveSheetBranchIdx).toBeGreaterThan(-1);
     const branchStart = routeSource.lastIndexOf("} else if (", liveSheetBranchIdx);
     const branchEnd = routeSource.indexOf("} else if (decision?.status === \"assigned\" && decision.assignedAgentId) {", liveSheetBranchIdx);
@@ -38,13 +44,13 @@ describe("workspace messages route -- live dispatch reaches processSelectedGoogl
 
   it("the live-sheet branch is gated on NOT having a spreadsheet-type attachment present -- the file-upload branch above it stays the exclusive handler when a real attachment IS present", () => {
     const attachmentBranchIdx = routeSource.indexOf("await processSpreadsheetAttachment(userId, attachmentMeta)");
-    const liveSheetBranchIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId, message)");
+    const liveSheetBranchIdx = routeSource.lastIndexOf("await processSelectedGoogleSheet(userId, message)");
     expect(attachmentBranchIdx).toBeGreaterThan(-1);
     expect(liveSheetBranchIdx).toBeGreaterThan(attachmentBranchIdx);
   });
 
   it("never sends spreadsheet rows through the LLM -- the live-sheet branch's only model-adjacent variable is the compact chat reply text, never a raw-rows blob", () => {
-    const liveSheetBranchIdx = routeSource.indexOf("await processSelectedGoogleSheet(userId, message)");
+    const liveSheetBranchIdx = routeSource.lastIndexOf("await processSelectedGoogleSheet(userId, message)");
     const branchStart = routeSource.lastIndexOf("} else if (", liveSheetBranchIdx);
     const branchEnd = routeSource.indexOf("} else if (decision?.status === \"assigned\" && decision.assignedAgentId) {", liveSheetBranchIdx);
     const liveSheetBranchBody = routeSource.slice(branchStart, branchEnd);
